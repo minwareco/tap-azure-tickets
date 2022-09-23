@@ -1,2 +1,2 @@
 # tap-azure-tickets
-Tap for Azure DevOps tickets
+Singer tap for Azure DevOps tickets
