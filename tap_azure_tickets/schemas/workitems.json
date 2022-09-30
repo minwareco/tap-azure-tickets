@@ -1,0 +1,175 @@
+{
+  "title": "WorkItem",
+  "type": [
+    "null",
+    "object"
+  ],
+  "properties": {
+    "_sdc_id": {
+      "type": [
+        "string"
+      ]
+    },
+    "id": {
+      "type": [
+        "string"
+      ]
+    },
+    "org": {
+      "type": [
+        "string"
+      ]
+    },
+    "project": {
+      "type": [
+        "string"
+      ]
+    },
+    "assignedTo": {
+      "$ref": "UserObject"
+    },
+    "closedBy": {
+      "$ref": "UserObject"
+    },
+    "closedDate": {
+      "type": [
+        "null",
+        "string"
+      ],
+      "format": "date-time"
+    },
+    "closedStatus": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "closedStatusCode": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "changedBy": {
+      "$ref": "UserObject"
+    },
+    "changedDate": {
+      "type": [
+        "null",
+        "string"
+      ],
+      "format": "date-time"
+    },
+    "createdBy": {
+      "$ref": "UserObject"
+    },
+    "createdDate": {
+      "type": [
+        "null",
+        "string"
+      ],
+      "format": "date-time"
+    },
+    "description": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "effort": {
+      "type": [
+        "null",
+        "number"
+      ]
+    },
+    "finishDate": {
+      "type": [
+        "null",
+        "string"
+      ],
+      "format": "date-time"
+    },
+    "priority": {
+      "type": [
+        "null",
+        "integer"
+      ]
+    },
+    "resolvedBy": {
+      "$ref": "UserObject"
+    },
+    "resolvedDate": {
+      "type": [
+        "null",
+        "string"
+      ],
+      "format": "date-time"
+    },
+    "stackRank": {
+      "type": [
+        "null",
+        "integer"
+      ]
+    },
+    "state": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "stateChangeDate": {
+      "type": [
+        "null",
+        "string"
+      ],
+      "format": "date-time"
+    },
+    "startDate": {
+      "type": [
+        "null",
+        "string"
+      ],
+      "format": "date-time"
+    },
+    "type": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "title": {
+      "type": [
+        "null",
+        "string"
+      ]
+    }
+  },
+  "definitions": {
+    "UserObject": {
+      "type": [
+        "null",
+        "object"
+      ],
+      "properties": {
+        "id": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "displayName": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "uniqueName": {
+          "type": [
+            "null",
+            "string"
+          ]
+        }
+      }
+    }
+  }
+}

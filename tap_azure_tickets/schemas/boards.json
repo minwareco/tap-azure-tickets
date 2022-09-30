@@ -10,6 +10,16 @@
         "string"
       ]
     },
+    "org": {
+      "type": [
+        "string"
+      ]
+    },
+    "project": {
+      "type": [
+        "string"
+      ]
+    },
     "canEdit": {
       "type": [
         "null",

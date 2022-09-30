@@ -1,19 +1,14 @@
-import argparse
 import os
 import json
-import collections
-import time
+import functools
 from dateutil import parser
 import pytz
+import time
 import requests
 import re
-import psutil
-import asyncio
-import gc
 import singer
 import singer.bookmarks as bookmarks
 import singer.metrics as metrics
-import difflib
 
 
 from singer import metadata
@@ -21,14 +16,53 @@ from singer import metadata
 session = requests.Session()
 logger = singer.get_logger()
 
-REQUIRED_CONFIG_KEYS = ['start_date', 'user_name', 'access_token', 'org', 'projects']
+# globals which hold data across streams
+workItemIds = []
+
+# map of Azure field names to more usable/readable field names
+FIELD_MAP = {
+    "System.Id": "id",
+    "System.AssignedTo": "assignedTo",
+    "Microsoft.VSTS.Common.ClosedBy": "closedBy",
+    "Microsoft.VSTS.Common.ClosedDate": "closedDate",
+    "Microsoft.VSTS.CodeReview.ClosedStatus": "closedStatus",
+    "Microsoft.VSTS.CodeReview.ClosedStatusCode": "closedStatusCode",
+    "System.ChangedDate": "changedDate",
+    "System.ChangedBy": "changedBy",
+    "System.CreatedBy": "createdBy",
+    "System.CreatedDate": "createdDate",
+    "System.Description": "description",
+    "Microsoft.VSTS.Scheduling.Effort": "effort",
+    "Microsoft.VSTS.Scheduling.FinishDate": "finishDate",
+    "Microsoft.VSTS.Common.Priority": "priority",
+    "Microsoft.VSTS.Common.ResolvedBy": "resolvedBy",
+    "Microsoft.VSTS.Common.ResolvedDate": "resolvedDate",
+    "Microsoft.VSTS.Common.StackRank": "stackRank",
+    "Microsoft.VSTS.Scheduling.StartDate": "startDate",
+    "System.State": "state",
+    "Microsoft.VSTS.Common.StateChangeDate": "stateChangeDate",
+    "System.Title": "title",
+    "System.WorkItemType": "type",
+}
+
+REQUIRED_CONFIG_KEYS = [
+    'start_date',
+    'user_name',
+    'access_token',
+    'org',
+    'projects'
+]
 
 KEY_PROPERTIES = {
     'boards': ['id'],
+    'iterations': ['id'],
     'projects': ['id'],
+    'teams': ['id'],
+    'updates': ['id'],
+    'workitems': ['_sdc_id'],
 }
 
-API_VESION = "6.0"
+API_VERSION = "6.0"
 
 class AzureException(Exception):
     pass
@@ -119,13 +153,30 @@ ERROR_CODE_EXCEPTION_MAPPING = {
     },
 }
 
-def get_bookmark(state, repo, stream_name, bookmark_key, default_value=None):
-    repo_stream_dict = bookmarks.get_bookmark(state, repo, stream_name)
-    if repo_stream_dict:
-        return repo_stream_dict.get(bookmark_key)
+def get_bookmark(state, project_id, stream_name, bookmark_key, default_value=None):
+    project_stream_dict = bookmarks.get_bookmark(state, project_id, stream_name)
+    if project_stream_dict:
+        return project_stream_dict.get(bookmark_key)
     if default_value:
         return default_value
     return None
+
+default_bookmark_date = '1970-01-01T00:00:00Z'
+
+def get_bookmark_date(state, project_id, stream_name, bookmark_key, default_value=default_bookmark_date):
+    bookmark = get_bookmark(state, project_id, stream_name, bookmark_key, default_value)
+    if not bookmark:
+        bookmark = default_bookmark_date if default_value is None else default_value
+
+    return parse_iso8601(bookmark)
+
+def parse_iso8601(input):
+    result = parser.parse(input)
+    if result.tzinfo is None:
+        return pytz.UTC.localize(result)
+    else:
+        return result
+
 
 def raise_for_error(resp, source, url):
     error_code = resp.status_code
@@ -177,6 +228,20 @@ def authed_get(source, url, headers={}):
         # Uncomment for debugging
         #logger.info("requesting {}".format(url))
         resp = session.request(method='get', url=url)
+
+        if resp.status_code != 200:
+            raise_for_error(resp, source, url)
+        timer.tags[metrics.Tag.http_status_code] = resp.status_code
+        rate_throttling(resp)
+        return resp
+
+# pylint: disable=dangerous-default-value
+def authed_post(source, url, json, headers={}):
+    with metrics.http_request_timer(source) as timer:
+        session.headers.update(headers)
+        # Uncomment for debugging
+        #logger.info("requesting {}".format(url))
+        resp = session.request(method='post', url=url, json=json)
 
         if resp.status_code != 200:
             raise_for_error(resp, source, url)
@@ -328,72 +393,282 @@ def do_discover(config):
     # dump catalog
     print(json.dumps(catalog, indent=2))
 
-def get_selected_projects(org, filter):
+def get_selected_projects(org, filters):
+    filters = filters or []
+
+    # convert simple wildcard filter syntax into regex. for example, "abc*" becomes "^abc.*$"
+    for filter in filters:
+        filter = filter.strip() \
+            .replace('.', '\\.') \
+            .replace('*', '.*')
+        filter = "^{}$".format(filter)
+
+    # if there are no filters, create one which will allow all projects
+    if len(filters) == 0:
+        filters = ['.*']
+
+    result = []
     for response in authed_get_all_pages(
         'projects',
-        "https://dev.azure.com/{}/_apis/boards?api-version={}".format(org, API_VESION),
+        "https://dev.azure.com/{}/_apis/projects?api-version={}".format(org, API_VERSION),
         '$top',
         'continuationToken'
     ):
         projects = response.json()['value']
         for project in projects:
-            logger.info("Loaded project: %s", project)
-    
-def sync_all_boards(schema, org, project, state, mdata):
-    # bookmarks not used for this stream
-    
-    with metrics.record_counter('boards') as counter:
-        extraction_time = singer.utils.now()
+            for filter in filters:
+                if re.search(filter, project['name']):
+                    result.append(project)
+    return result
 
+def get_teams_for_project(org, projectId):
+    teams = []
+    for response in authed_get_all_pages(
+        'teams',
+        "https://dev.azure.com/{}/_apis/projects/{}/teams?api-version={}&$mine=false".format(org, projectId, API_VERSION),
+        '$top',
+        'continuationToken'
+    ):
+        teams += response.json()['value']
+
+    return teams
+
+def sync_all_boards(schema, org, project, teams, state, mdata, start_date):
+    # bookmarks not used for this stream
+    streamId = 'boards'
+    logger.info("Syncing all boards")
+
+    with metrics.record_counter(streamId) as counter:
+        extraction_time = singer.utils.now()
         for response in authed_get_all_pages(
-            'projects',
-            "https://dev.azure.com/{}/_apis/boards?" \
-            "api-version={}" \
-            .format(org, API_VESION),
+            'boards',
+            "https://dev.azure.com/{}/{}/_apis/work/boards?api-version={}".format(org, project['id'], API_VERSION),
             '$top',
-            '$skip',
-            True # No link header to indicate availability of more data
+            '$skip'
         ):
-            projects = response.json()['value']
-            for project in projects:
-                projectName = project['name']
-                for response in authed_get_all_pages(
-                    'repositories',
-                    "https://dev.azure.com/{}/{}/_apis/git/repositories?" \
-                    "api-version={}" \
-                    .format(org, projectName, API_VESION),
-                    '$top',
-                    '$skip',
-                    True # No link header to indicate availability of more data
-                ):
-                    repos = response.json()['value']
-                    for repo in repos:
-                        repoName = repo['name']
-                        repo['_sdc_repository'] = '{}/{}/_git/{}'.format(org, projectName, repoName)
-                        
-                        with singer.Transformer() as transformer:
-                            rec = transformer.transform(repo, schema,
-                                metadata=metadata.to_map(mdata))
-                        singer.write_record('repositories', rec, time_extracted=extraction_time)
-                        counter.increment()
+            boards = response.json()['value']
+            emit_records(streamId, schema, org, project, boards, extraction_time, counter, mdata)
     return state
+
+def sync_all_iterations(schema, org, project, teams, state, mdata, start_date):
+    # bookmarks not used for this stream
+    streamId = 'iterations'
+    logger.info("Syncing all iterations")
+
+    with metrics.record_counter(streamId) as counter:
+        extraction_time = singer.utils.now()
+        for response in authed_get_all_pages(
+            'boards',
+            "https://dev.azure.com/{}/{}/_apis/work/teamsettings/iterations?api-version={}".format(org, project['id'], API_VERSION),
+            '$top',
+            '$skip'
+        ):
+            iterations = response.json()['value']
+
+            # flatten out some properties for convenience
+            for iteration in iterations:
+                attributes = iteration.get('attributes') or {}
+                iteration['startDate'] = attributes.get('startDate')
+                iteration['finishDate'] = attributes.get('finishDate')
+                iteration['timeFrame'] = attributes.get('timeFrame')
+            
+            emit_records(streamId, schema, org, project, iterations, extraction_time, counter, mdata)
+    return state
+
+def sync_all_workitems(schema, org, project, teams, state, mdata, start_date):
+    global workItemIds
+
+    streamId = 'workitems'
+    bookmarkDate = get_bookmark_date(state, project['id'], streamId, 'since', start_date)
+    logger.info("Syncing work items since = %s", bookmarkDate.isoformat())
+
+    # WIQL ref: https://learn.microsoft.com/en-us/azure/devops/boards/queries/wiql-syntax?view=azure-devops
+    wiql = """
+        SELECT [System.Id]
+        FROM WorkItems
+        WHERE [System.ChangedDate] >= '{}'
+        AND [System.TeamProject] = @project
+        ORDER BY [System.ChangedDate]
+        """.format(bookmarkDate.isoformat())
+    body = {
+        "query": wiql,
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    with metrics.record_counter(streamId) as counter:
+        extraction_time = singer.utils.now()
+        
+        # first, we need to execute a WIQL query to get a list of all the ticket IDs
+        # that have been modified since our last run. despite what it may seem, selecting
+        # more fields in the WIQL above will not return them, and instead it always only
+        # returns the ticket ID as a shallow ref.
+        maxWiqlResults = 20000 # max allowed by the API
+        response = authed_post(
+            streamId,
+            "https://dev.azure.com/{}/{}/_apis/wit/wiql?api-version={}&$top={}&timePrecision=true".format(org, project['id'], API_VERSION, maxWiqlResults),
+            body,
+            headers,
+        )
+
+        # now we need to page through the results 200 at a time (max allowed by the API)
+        # in order to get the actual ticket field values
+        itemRefs = response.json()['workItems']
+        itemRefsCount = len(itemRefs)
+        startIndex = 0
+        pageSize = 200 # max number of items which can be queried in batch
+        while startIndex < itemRefsCount:
+            extraction_time = singer.utils.now()
+            batchItemRefs = itemRefs[startIndex:(startIndex + pageSize)]
+            body = {
+                "ids": list(map(lambda item: item['id'], batchItemRefs)),
+                "fields": list(dict.keys(FIELD_MAP)),
+            }
+            startIndex += pageSize
+            response = authed_post(
+                'workitemsbatch',
+                "https://dev.azure.com/{}/{}/_apis/wit/workitemsbatch?api-version={}".format(org, project['id'], API_VERSION),
+                body,
+                headers,
+            )
+            items = response.json()['value']
+            normalizedItems = list(map(lambda item: normalize_work_item(item, project, FIELD_MAP), items))
+            emit_records(streamId, schema, org, project, normalizedItems, extraction_time, counter, mdata)
+        
+        # set the global array of work item IDs for sub-streams to process (e.g. updates)
+        workItemIds = list(map(lambda item: item['id'], itemRefs))
+    
+    singer.write_bookmark(state, project['id'], streamId, {
+        'since': singer.utils.strftime(extraction_time),
+    })
+
+    return state
+
+def generate_sdc_id(item, project):
+    return "{}/{}".format(project['id'], item['id'])
+
+def normalize_work_item(item, project, fieldMap):
+    # derive our own ID because unfortunately the ID of a work item is not a UUID
+    # and instead is an incrementing integer within an Azure org
+    normalizedItem = {
+        "_sdc_id": generate_sdc_id(item, project)
+    }
+
+    # for each field in the raw work item from Azure, use its mapped name to set the field
+    # value into the normalized item
+    for fieldName, fieldValue in item['fields'].items():
+        normalizedFieldName = fieldMap[fieldName]
+        normalizedItem[normalizedFieldName] = fieldValue
+
+    return normalizedItem
+
+def sync_all_updates(schema, org, project, teams, state, mdata, start_date):
+    global workItemIds
+
+    streamId = 'updates'
+    bookmarkDate = get_bookmark_date(state, project['id'], streamId, 'since', start_date)
+    logger.info("Syncing work item updates since = %s for %d items", bookmarkDate.isoformat(), len(workItemIds))
+
+    with metrics.record_counter(streamId) as counter:
+        extraction_time = singer.utils.now()
+        
+        # iterate over all the work items that were processed so we can absorb their updates
+        for workItemId in workItemIds:
+
+            # ref: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/updates/list?view=azure-devops-rest-7.1&tabs=HTTP
+            for response in authed_get_all_pages(
+                streamId,
+                "https://dev.azure.com/{}/{}/_apis/wit/workItems/{}/updates?api-version={}".format(org, project['id'], workItemId, API_VERSION),
+                '$top',
+                '$skip'
+            ):
+                updates = response.json()['value']
+                updatesToProcess = []
+
+                for update in updates:
+                    # if this revision was ingested previously, then skip it. there is no way to make the
+                    # API call itself filter these out
+                    revisedDate = parse_iso8601(update['revisedDate'])
+                    if revisedDate < bookmarkDate:
+                        continue
+
+                    # convert the dict of <string, WorkItemFieldUpdate> to an array of objects suitable
+                    # for our desired output schema, which is an array of update objects.
+                    # WorkItemFieldUpdate: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/updates/list?view=azure-devops-rest-7.1&tabs=HTTP#workitemfieldupdate
+                    normalizedFields = []
+                    for fieldName, values in update['fields'].items():
+                        fieldName = FIELD_MAP.get(fieldName)
+                        if fieldName is not None:
+                            normalizedFields.append({
+                                "fieldName": fieldName,
+                                "oldValue": normalize_value_to_string(values.get('oldValue')),
+                                "newValue": normalize_value_to_string(values.get('newValue')),
+                            })
+                    
+                    # derive our own ID because unfortunately the ID of an update is not a UUID
+                    # and instead is an incrementing integer within an Azure org
+                    update['_sdc_id'] = generate_sdc_id(update, project)
+                    update['fields'] = normalizedFields
+                    updatesToProcess.append(update)
+                
+                emit_records(streamId, schema, org, project, updatesToProcess, extraction_time, counter, mdata)
+    
+    singer.write_bookmark(state, project['id'], streamId, {
+        'since': singer.utils.strftime(extraction_time),
+    })
+
+    return state
+
+def normalize_value_to_string(value):
+    if value is None:
+        return value
+    if isinstance(value, str):
+        return value
+    elif isinstance(value, dict):
+        return json.dumps(value)
+    else:
+        return str(value) # probably a number or boolean
+
+def sync_all_teams(schema, org, project, teams, state, mdata, start_date):
+    # bookmarks not used for this stream
+    streamId = 'teams'
+    logger.info("Syncing all teams")
+    with metrics.record_counter(streamId) as counter:
+        extraction_time = singer.utils.now()
+        emit_records(streamId, schema, org, project, teams, extraction_time, counter, mdata)
+    return state
+
+def sync_project(schema, org, project, teams, state, mdata, start_date):
+    # bookmarks not used for this stream
+    streamId = 'projects'
+    logger.info("Syncing project %s (ID = %s)", project.get('name'), project.get('id'))
+    with metrics.record_counter(streamId) as counter:
+        extraction_time = singer.utils.now()
+        emit_records(streamId, schema, org, project, [project], extraction_time, counter, mdata)
+    return state
+
+def emit_records(streamId, schema, org, project, objects, extraction_time, counter, mdata):
+    mdataMap = metadata.to_map(mdata)
+    for object in objects:
+        object['org'] = org
+        object['project'] = project
+        with singer.Transformer() as transformer:
+            rec = transformer.transform(object, schema, metadata=mdataMap)
+        singer.write_record(streamId, rec, time_extracted=extraction_time)
+        if counter:
+            counter.increment()
+
 
 def get_selected_streams(catalog):
     '''
-    Gets selected streams.  Checks schema's 'selected'
-    first -- and then checks metadata, looking for an empty
-    breadcrumb and mdata with a 'selected' entry
+    Gets selected streams based on the 'selected' property.
     '''
     selected_streams = []
     for stream in catalog['streams']:
-        stream_metadata = stream['metadata']
         if stream['schema'].get('selected', False):
             selected_streams.append(stream['tap_stream_id'])
-        else:
-            for entry in stream_metadata:
-                # stream metadata will have empty breadcrumb
-                if not entry['breadcrumb'] and entry['metadata'].get('selected',None):
-                    selected_streams.append(stream['tap_stream_id'])
 
     return selected_streams
 
@@ -405,12 +680,15 @@ def get_stream_from_catalog(stream_id, catalog):
 
 SYNC_FUNCTIONS = {
     'boards': sync_all_boards,
-    # 'projects': sync_all_projects,
+    'iterations': sync_all_iterations,
+    'projects': sync_project,
+    'teams': sync_all_teams,
+    'workitems': sync_all_workitems,
+    'updates': sync_all_updates,
 }
 
 SUB_STREAMS = {
-    # 'pull_requests': ['pull_request_threads'],
-    # 'commit_files': ['refs']
+    'workitems': ['updates'],
 }
 
 projects = None
@@ -420,13 +698,19 @@ def do_sync(config, state, catalog):
     The state structure will be the following:
     {
       "bookmarks": {
-        "project1/repo1": {
-          "commits": {
+        "project-uuid-1": {
+          "workitems": {
+            "since": "2018-11-14T13:21:20.700360Z"
+          },
+          "updates": {
             "since": "2018-11-14T13:21:20.700360Z"
           }
         },
-        "project2/repo2": {
-          "commits": {
+        "project-uuid-2": {
+          "workitems": {
+            "since": "2018-11-14T13:21:20.700360Z"
+          },
+          "updates": {
             "since": "2018-11-14T13:21:20.700360Z"
           }
         }
@@ -435,21 +719,27 @@ def do_sync(config, state, catalog):
     '''
 
     start_date = config['start_date'] if 'start_date' in config else None
+
     # get selected streams, make sure stream dependencies are met
     selected_stream_ids = get_selected_streams(catalog)
     validate_dependencies(selected_stream_ids)
 
+    # sort streams such that sub streams always come after their parent stream dependency
+    stream_sorter = lambda a, b: -1 if SUB_STREAMS.get(a['tap_stream_id']) else 1
+    catalog['streams'].sort(key=functools.cmp_to_key(stream_sorter))
+
     org = config['org']
 
-    # load all the projects which match the filter provided by our config. the projects
-    # are cached globally so we can reference them as needed throughout all downstream tap work.
-    global projects
-    projects = get_selected_projects(config['projects'])
-    return
+    # load all the projects which match the filter provided by our config
+    projects = get_selected_projects(config['org'], config['projects'])
 
-    #pylint: disable=too-many-nested-blocks
+    # for each project, run each selected steam procesor
+    is_schema_written = {}
     for project in projects:
-        logger.info("Starting sync of project: %s", project)
+        logger.info("Starting sync of project: %s", project['name'])
+
+        teams = get_teams_for_project(org, project['id'])
+
         for stream in catalog['streams']:
             stream_id = stream['tap_stream_id']
             stream_schema = stream['schema']
@@ -459,12 +749,14 @@ def do_sync(config, state, catalog):
             if not SYNC_FUNCTIONS.get(stream_id):
                 continue
 
-            # if stream is selected, write schema and sync
+            # if stream is selected, write schema (once only) and sync
             if stream_id in selected_stream_ids:
-                singer.write_schema(stream_id, stream_schema, stream['key_properties'])
+                if is_schema_written.get(stream_id) is None:
+                    singer.write_schema(stream_id, stream_schema, stream['key_properties'])
+                    is_schema_written[stream_id] = True
 
                 sync_func = SYNC_FUNCTIONS[stream_id]
-                state = sync_func(stream_schema, org, project, state, mdata, start_date)
+                state = sync_func(stream_schema, org, project, teams, state, mdata, start_date)
 
     singer.write_state(state)
 
@@ -472,14 +764,14 @@ def do_sync(config, state, catalog):
 def main():
     args = singer.utils.parse_args(REQUIRED_CONFIG_KEYS)
 
-    # Initialize basic auth
-    user_name = args.config['user_name']
-    access_token = args.config['access_token']
-    session.auth = (user_name, access_token)
-
     if args.discover:
         do_discover(args.config)
     else:
+        # Initialize basic auth
+        user_name = args.config['user_name']
+        access_token = args.config['access_token']
+        session.auth = (user_name, access_token)
+
         catalog = args.properties if args.properties else get_catalog()
         do_sync(args.config, args.state, catalog)
 

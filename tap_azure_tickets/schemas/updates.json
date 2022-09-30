@@ -1,0 +1,113 @@
+{
+  "title": "Update",
+  "type": [
+    "null",
+    "object"
+  ],
+  "properties": {
+    "_sdc_id": {
+      "type": [
+        "string"
+      ]
+    },
+    "id": {
+      "type": [
+        "string"
+      ]
+    },
+    "org": {
+      "type": [
+        "string"
+      ]
+    },
+    "project": {
+      "type": [
+        "string"
+      ]
+    },
+    "fields": {
+      "type": [
+        "null",
+        "array"
+      ],
+      "items": {
+        "title": "Updated Field",
+        "type": [
+          "null",
+          "object"
+        ],
+        "properties": {
+          "fieldName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "oldValue": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "newValue": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      }
+    },
+    "rev": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "revisedBy": {
+      "type": [
+        "null",
+        "object"
+      ],
+      "properties": {
+        "id": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "displayName": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "uniqueName": {
+          "type": [
+            "null",
+            "string"
+          ]
+        }
+      }
+    },
+    "revisedDate": {
+      "type": [
+        "null",
+        "string"
+      ],
+      "format": "date-time"
+    },
+    "url": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "workItemId": {
+      "type": [
+        "null",
+        "string"
+      ]
+    }
+  }
+}
