@@ -58,7 +58,7 @@ KEY_PROPERTIES = {
     'iterations': ['id'],
     'projects': ['id'],
     'teams': ['id'],
-    'updates': ['id'],
+    'updates': ['_sdc_id'],
     'workitems': ['_sdc_id'],
 }
 
