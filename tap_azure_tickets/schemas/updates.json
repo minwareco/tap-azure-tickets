@@ -108,6 +108,12 @@
         "null",
         "string"
       ]
+    },
+    "workItemSdcId": {
+      "type": [
+        "null",
+        "string"
+      ]
     }
   }
 }

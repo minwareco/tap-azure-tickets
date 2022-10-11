@@ -10,6 +10,11 @@
         "string"
       ]
     },
+    "org": {
+      "type": [
+        "string"
+      ]
+    },
     "description": {
       "type": [
         "null",

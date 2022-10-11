@@ -26,10 +26,10 @@
       ]
     },
     "assignedTo": {
-      "$ref": "UserObject"
+      "$ref": "#/definitions/UserObject"
     },
     "closedBy": {
-      "$ref": "UserObject"
+      "$ref": "#/definitions/UserObject"
     },
     "closedDate": {
       "type": [
@@ -51,7 +51,7 @@
       ]
     },
     "changedBy": {
-      "$ref": "UserObject"
+      "$ref": "#/definitions/UserObject"
     },
     "changedDate": {
       "type": [
@@ -61,7 +61,7 @@
       "format": "date-time"
     },
     "createdBy": {
-      "$ref": "UserObject"
+      "$ref": "#/definitions/UserObject"
     },
     "createdDate": {
       "type": [
@@ -89,6 +89,12 @@
       ],
       "format": "date-time"
     },
+    "iterationPath": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
     "priority": {
       "type": [
         "null",
@@ -96,7 +102,7 @@
       ]
     },
     "resolvedBy": {
-      "$ref": "UserObject"
+      "$ref": "#/definitions/UserObject"
     },
     "resolvedDate": {
       "type": [

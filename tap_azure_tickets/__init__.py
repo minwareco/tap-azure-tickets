@@ -41,6 +41,7 @@ FIELD_MAP = {
     "Microsoft.VSTS.Scheduling.StartDate": "startDate",
     "System.State": "state",
     "Microsoft.VSTS.Common.StateChangeDate": "stateChangeDate",
+    "System.IterationPath": "iterationPath",
     "System.Title": "title",
     "System.WorkItemType": "type",
 }
@@ -534,7 +535,7 @@ def sync_all_workitems(schema, org, project, teams, state, mdata, start_date):
                 headers,
             )
             items = response.json()['value']
-            normalizedItems = list(map(lambda item: normalize_work_item(item, project, FIELD_MAP), items))
+            normalizedItems = list(map(lambda item: normalize_work_item(item, org, FIELD_MAP), items))
             emit_records(streamId, schema, org, project, normalizedItems, extraction_time, counter, mdata)
         
         # set the global array of work item IDs for sub-streams to process (e.g. updates)
@@ -546,14 +547,14 @@ def sync_all_workitems(schema, org, project, teams, state, mdata, start_date):
 
     return state
 
-def generate_sdc_id(item, project):
-    return "{}/{}".format(project['id'], item['id'])
+def generate_sdc_id(org, id):
+    return "{}/{}".format(org, id)
 
-def normalize_work_item(item, project, fieldMap):
+def normalize_work_item(item, org, fieldMap):
     # derive our own ID because unfortunately the ID of a work item is not a UUID
     # and instead is an incrementing integer within an Azure org
     normalizedItem = {
-        "_sdc_id": generate_sdc_id(item, project)
+        "_sdc_id": generate_sdc_id(org, item['id'])
     }
 
     # for each field in the raw work item from Azure, use its mapped name to set the field
@@ -609,7 +610,8 @@ def sync_all_updates(schema, org, project, teams, state, mdata, start_date):
                     
                     # derive our own ID because unfortunately the ID of an update is not a UUID
                     # and instead is an incrementing integer within an Azure org
-                    update['_sdc_id'] = generate_sdc_id(update, project)
+                    update['_sdc_id'] = generate_sdc_id(org, update['id'])
+                    update['workItemSdcId'] = generate_sdc_id(org, update['workItemId'])
                     update['fields'] = normalizedFields
                     updatesToProcess.append(update)
                 
@@ -653,7 +655,7 @@ def emit_records(streamId, schema, org, project, objects, extraction_time, count
     mdataMap = metadata.to_map(mdata)
     for object in objects:
         object['org'] = org
-        object['project'] = project
+        object['project'] = project['id']
         with singer.Transformer() as transformer:
             rec = transformer.transform(object, schema, metadata=mdataMap)
         singer.write_record(streamId, rec, time_extracted=extraction_time)
