@@ -599,15 +599,18 @@ def sync_all_updates(schema, org, project, teams, state, mdata, start_date):
                     # for our desired output schema, which is an array of update objects.
                     # WorkItemFieldUpdate: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/updates/list?view=azure-devops-rest-7.1&tabs=HTTP#workitemfieldupdate
                     normalizedFields = []
-                    for fieldName, values in update['fields'].items():
-                        fieldName = FIELD_MAP.get(fieldName)
-                        if fieldName is not None:
-                            normalizedFields.append({
-                                "fieldName": fieldName,
-                                "oldValue": normalize_value_to_string(values.get('oldValue')),
-                                "newValue": normalize_value_to_string(values.get('newValue')),
-                            })
-                    
+                    # If the only change was adding / removing a relation
+                    # no fields are changed
+                    if 'fields' in update:
+                        for fieldName, values in update['fields'].items():
+                            fieldName = FIELD_MAP.get(fieldName)
+                            if fieldName is not None:
+                                normalizedFields.append({
+                                    "fieldName": fieldName,
+                                    "oldValue": normalize_value_to_string(values.get('oldValue')),
+                                    "newValue": normalize_value_to_string(values.get('newValue')),
+                                })
+                        
                     # derive our own ID because unfortunately the ID of an update is not a UUID
                     # and instead is an incrementing integer within an Azure org
                     update['_sdc_id'] = generate_sdc_id(org, update['id'])
