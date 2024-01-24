@@ -520,7 +520,7 @@ def sync_all_workitems(schema, org, project, teams, state, mdata, start_date):
 
             resp_json = response.json()
             itemRefs = resp_json['workItems']
-            logger.info('Work items returned by wiql query : {}'.format(len(batch_of_work_item_ids)))
+            logger.info('Work items returned by wiql query : {}'.format(len(itemRefs)))
 
             # now we need to page through the results 200 at a time (max allowed by the API)
             # in order to get the actual ticket field values
