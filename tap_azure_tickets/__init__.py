@@ -17,7 +17,7 @@ session = requests.Session()
 logger = singer.get_logger()
 
 # globals which hold data across streams
-workItemIds = []
+workItemIds = set()
 
 # map of Azure field names to more usable/readable field names
 FIELD_MAP = {
@@ -472,7 +472,7 @@ def sync_all_iterations(schema, org, project, teams, state, mdata, start_date):
                 iteration['startDate'] = attributes.get('startDate')
                 iteration['finishDate'] = attributes.get('finishDate')
                 iteration['timeFrame'] = attributes.get('timeFrame')
-            
+
             emit_records(streamId, schema, org, project, iterations, extraction_time, counter, mdata)
     return state
 
@@ -483,64 +483,78 @@ def sync_all_workitems(schema, org, project, teams, state, mdata, start_date):
     bookmarkDate = get_bookmark_date(state, project['id'], streamId, 'since', start_date)
     logger.info("Syncing work items since = %s", bookmarkDate.isoformat())
 
-    # WIQL ref: https://learn.microsoft.com/en-us/azure/devops/boards/queries/wiql-syntax?view=azure-devops
-    wiql = """
-        SELECT [System.Id]
-        FROM WorkItems
-        WHERE [System.ChangedDate] >= '{}'
-        AND [System.TeamProject] = @project
-        ORDER BY [System.ChangedDate]
-        """.format(bookmarkDate.isoformat())
-    body = {
-        "query": wiql,
-    }
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-
     with metrics.record_counter(streamId) as counter:
         extraction_time = singer.utils.now()
-        
-        # first, we need to execute a WIQL query to get a list of all the ticket IDs
-        # that have been modified since our last run. despite what it may seem, selecting
-        # more fields in the WIQL above will not return them, and instead it always only
-        # returns the ticket ID as a shallow ref.
-        maxWiqlResults = 20000 # max allowed by the API
-        response = authed_post(
-            streamId,
-            "https://dev.azure.com/{}/{}/_apis/wit/wiql?api-version={}&$top={}&timePrecision=true".format(org, project['id'], API_VERSION, maxWiqlResults),
-            body,
-            headers,
-        )
 
-        # now we need to page through the results 200 at a time (max allowed by the API)
-        # in order to get the actual ticket field values
-        itemRefs = response.json()['workItems']
-        itemRefsCount = len(itemRefs)
-        startIndex = 0
-        pageSize = 200 # max number of items which can be queried in batch
-        while startIndex < itemRefsCount:
-            extraction_time = singer.utils.now()
-            batchItemRefs = itemRefs[startIndex:(startIndex + pageSize)]
+        itemRefs = None
+        from_change_date = bookmarkDate.isoformat()
+        maxWiqlResults = 20000 - 1 # at 20000 the API will fail with an error
+        while itemRefs is None or len(itemRefs) == maxWiqlResults:
+            # WIQL ref: https://learn.microsoft.com/en-us/azure/devops/boards/queries/wiql-syntax?view=azure-devops
+            wiql = """
+                SELECT [System.Id]
+                FROM WorkItems
+                WHERE [System.ChangedDate] >= '{}'
+                AND [System.TeamProject] = @project
+                ORDER BY [System.ChangedDate]
+                """.format(from_change_date)
             body = {
-                "ids": list(map(lambda item: item['id'], batchItemRefs)),
-                "fields": list(dict.keys(FIELD_MAP)),
+                "query": wiql,
             }
-            startIndex += pageSize
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+
+            logger.info(wiql)
+            # first, we need to execute a WIQL query to get a list of all the ticket IDs
+            # that have been modified since our last run. despite what it may seem, selecting
+            # more fields in the WIQL above will not return them, and instead it always only
+            # returns the ticket ID as a shallow ref.
             response = authed_post(
-                'workitemsbatch',
-                "https://dev.azure.com/{}/{}/_apis/wit/workitemsbatch?api-version={}".format(org, project['id'], API_VERSION),
+                streamId,
+                "https://dev.azure.com/{}/{}/_apis/wit/wiql?api-version={}&$top={}&timePrecision=true".format(org, project['id'], API_VERSION, maxWiqlResults),
                 body,
                 headers,
             )
-            items = response.json()['value']
-            normalizedItems = list(map(lambda item: normalize_work_item(item, org, FIELD_MAP), items))
-            emit_records(streamId, schema, org, project, normalizedItems, extraction_time, counter, mdata)
-        
-        # set the global array of work item IDs for sub-streams to process (e.g. updates)
-        workItemIds = list(map(lambda item: item['id'], itemRefs))
-    
+
+            resp_json = response.json()
+            itemRefs = resp_json['workItems']
+            logger.info('Work items returned by wiql query : {}'.format(len(itemRefs)))
+
+            # now we need to page through the results 200 at a time (max allowed by the API)
+            # in order to get the actual ticket field values
+            itemRefsCount = len(itemRefs)
+            startIndex = 0
+            pageSize = 200 # max number of items which can be queried in batch
+            while startIndex < itemRefsCount:
+                extraction_time = singer.utils.now()
+                batchItemRefs = itemRefs[startIndex:(startIndex + pageSize)]
+                batchItemIds = list(map(lambda item: item['id'], batchItemRefs))
+                body = {
+                    "ids": batchItemIds,
+                    "fields": list(dict.keys(FIELD_MAP)),
+                }
+                startIndex += pageSize
+                response = authed_post(
+                    'workitemsbatch',
+                    "https://dev.azure.com/{}/{}/_apis/wit/workitemsbatch?api-version={}".format(org, project['id'], API_VERSION),
+                    body,
+                    headers,
+                )
+                items = response.json()['value']
+                normalizedItems = list(map(lambda item: normalize_work_item(item, org, FIELD_MAP), items))
+                from_change_date = max(
+                    list(
+                        map(lambda item: item['changedDate'], normalizedItems)
+                    )
+                )
+
+                # add item ids to the global work item IDs for sub-streams to process (e.g. updates)
+                workItemIds.update(batchItemIds)
+
+                emit_records(streamId, schema, org, project, normalizedItems, extraction_time, counter, mdata)
+
     singer.write_bookmark(state, project['id'], streamId, {
         'since': singer.utils.strftime(extraction_time),
     })
@@ -574,7 +588,7 @@ def sync_all_updates(schema, org, project, teams, state, mdata, start_date):
 
     with metrics.record_counter(streamId) as counter:
         extraction_time = singer.utils.now()
-        
+
         # iterate over all the work items that were processed so we can absorb their updates
         for workItemId in workItemIds:
 
@@ -610,16 +624,16 @@ def sync_all_updates(schema, org, project, teams, state, mdata, start_date):
                                     "oldValue": normalize_value_to_string(values.get('oldValue')),
                                     "newValue": normalize_value_to_string(values.get('newValue')),
                                 })
-                        
+
                     # derive our own ID because unfortunately the ID of an update is not a UUID
                     # and instead is an incrementing integer within an Azure org
                     update['_sdc_id'] = generate_sdc_id(org, update['id'])
                     update['workItemSdcId'] = generate_sdc_id(org, update['workItemId'])
                     update['fields'] = normalizedFields
                     updatesToProcess.append(update)
-                
+
                 emit_records(streamId, schema, org, project, updatesToProcess, extraction_time, counter, mdata)
-    
+
     singer.write_bookmark(state, project['id'], streamId, {
         'since': singer.utils.strftime(extraction_time),
     })
