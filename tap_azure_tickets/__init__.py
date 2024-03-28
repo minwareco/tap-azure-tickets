@@ -1,6 +1,7 @@
 import os
 import json
 import functools
+import sys
 from dateutil import parser
 import pytz
 import time
@@ -441,14 +442,24 @@ def sync_all_boards(schema, org, project, teams, state, mdata, start_date):
 
     with metrics.record_counter(streamId) as counter:
         extraction_time = singer.utils.now()
-        for response in authed_get_all_pages(
-            'boards',
-            "https://dev.azure.com/{}/{}/_apis/work/boards?api-version={}".format(org, project['id'], API_VERSION),
-            '$top',
-            '$skip'
-        ):
-            boards = response.json()['value']
-            emit_records(streamId, schema, org, project, boards, extraction_time, counter, mdata)
+        try:
+            for response in authed_get_all_pages(
+                'boards',
+                "https://dev.azure.com/{}/{}/_apis/work/boards?api-version={}".format(org, project['id'], API_VERSION),
+                '$top',
+                '$skip'
+            ):
+                boards = response.json()['value']
+                emit_records(streamId, schema, org, project, boards, extraction_time, counter, mdata)
+        except InternalServerError as ex:
+            ex_str = str(ex)
+            # Ignore specific exception
+            # This exception occurs when the permissions don't allow access to a specific board
+            # There is no simple way to verify access before this occurs
+            if 'TF400497: The backlog iteration path that you specified is no longer valid.' in ex_str:
+                logger.warning(ex, exc_info=True)
+            else:
+                raise ex
     return state
 
 def sync_all_iterations(schema, org, project, teams, state, mdata, start_date):
