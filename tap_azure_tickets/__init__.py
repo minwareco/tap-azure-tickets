@@ -456,7 +456,11 @@ def sync_all_boards(schema, org, project, teams, state, mdata, start_date):
             # Ignore specific exception
             # This exception occurs when the permissions don't allow access to a specific board
             # There is no simple way to verify access before this occurs
-            if 'TF400497: The backlog iteration path that you specified is no longer valid.' in ex_str:
+            ignored_exceptions = [
+                'TF400497: The backlog iteration path that you specified is no longer valid.',
+                'TF400499: You have not set your team field.'
+            ]
+            if any(ignored_ex in ex_str for ignored_ex in ignored_exceptions):
                 logger.warning(ex, exc_info=True)
             else:
                 raise ex
