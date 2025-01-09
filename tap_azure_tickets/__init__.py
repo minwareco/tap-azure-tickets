@@ -222,9 +222,8 @@ def get_backoff_value_generator():
     def backoff_value(response):
         nonlocal tries
         tries += 1
-        if tries % 2 == 0:
-            with suppress(ValueError, AttributeError):
-                return int(response.headers.get("Retry-After"))
+        with suppress(ValueError, AttributeError):
+            return int(response.headers.get("Retry-After"))
         return 30 * (2 ** tries)
 
     return backoff_value
