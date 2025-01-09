@@ -9,7 +9,7 @@ setup(name='tap-azure-tickets',
       classifiers=['Programming Language :: Python :: 3 :: Only'],
       py_modules=['tap_azure_tickets'],
       install_requires=[
-          'singer-python==5.12.1',
+          'singer-python==6.1.0',
           'requests==2.20.0',
           'psutil==5.8.0'
       ],

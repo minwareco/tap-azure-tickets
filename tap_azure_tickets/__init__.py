@@ -3,6 +3,7 @@ import json
 import functools
 import sys
 from dateutil import parser
+from contextlib import suppress
 import pytz
 import time
 import requests
@@ -10,7 +11,7 @@ import re
 import singer
 import singer.bookmarks as bookmarks
 import singer.metrics as metrics
-
+import backoff
 
 from singer import metadata
 
@@ -200,28 +201,79 @@ def raise_for_error(resp, source, url):
             .get("message", "Unknown Error") if response_json == {} else response_json, \
             url)
 
+        # Map HTTP version numbers
+        http_versions = {
+            10: "HTTP/1.0",
+            11: "HTTP/1.1",
+            20: "HTTP/2.0"
+        }
+        http_version = http_versions.get(resp.raw.version, "Unknown")
+        message += "\nResponse Details: \n\t{} {}".format(http_version, resp.status_code)
+        for key, value in resp.headers.items():
+            message += "\n\t{}: {}".format(key, value)
+        if resp.content:
+            message += "\n\t{}".format(resp.text)
+
     exc = ERROR_CODE_EXCEPTION_MAPPING.get(error_code, {}).get("raise_exception", AzureException)
     raise exc(message) from None
 
-def calculate_seconds(epoch):
-    current = time.time()
-    return int(round((epoch - current), 0))
+def get_backoff_value_generator():
+    tries = 0
+    def backoff_value(response):
+        nonlocal tries
+        tries += 1
+        with suppress(ValueError, AttributeError):
+            return int(response.headers.get("Retry-After"))
+        return 30 * (2 ** tries)
 
-def rate_throttling(response):
-    '''
-    See documentation here, which recommends at least sleeping if a Retry-After header is sent.
+    return backoff_value
 
-    https://docs.microsoft.com/en-us/azure/devops/integrate/concepts/rate-limits?view=azure-devops
-    '''
-    if 'Retry-After' in response.headers:
-        waitTime = int(response.headers['Retry-After'])
-        if waitTime < 1:
-            # Probably should never happen, but sleep at least one second if this header for some
-            # reason isn't a valid int or is less than 1
-            waitTime = 1
-        logger.info("API Retry-After wait time header found, sleeping for {} seconds." \
-            .format(waitTime))
-        time.sleep(waitTime)
+@backoff.on_exception(backoff.expo,
+                      (requests.exceptions.RequestException),
+                      max_tries=5,
+                      giveup=lambda e: e.response is not None and e.response.status_code != 429 and 400 <= e.response.status_code < 500,
+                      factor=5,
+                      jitter=backoff.random_jitter,
+                      logger=logger)
+@backoff.on_predicate(backoff.runtime,
+                      predicate=lambda r: r.headers.get("Retry-After", None) != None or r.status_code >= 300,
+                      max_tries=5,
+                      value=get_backoff_value_generator(),
+                      jitter=backoff.random_jitter,
+                      logger=logger)
+def request(url, method='GET', json=None):
+    """
+    This function performs an HTTP request and implements a robust retry mechanism
+    to handle transient errors and optimize the request's success rate.
+
+    Key Features:
+    1. **Retry on Predicate (Retry-After Header)**:
+    - Retries when the response contains a "Retry-After" header, which is commonly used
+        to indicate when a client should retry a request.
+    - This is particularly useful for Azure, which may include "Retry-After" headers
+        for both 429 (Too Many Requests) and 5xx (Server Error) responses.
+    - A maximum of 8 retry attempts is made, respecting the "Retry-After" value
+        specified in the header.
+
+    2. **Retry on Exceptions**:
+    - Retries when a `requests.exceptions.RequestException` occurs.
+    - Uses an exponential backoff strategy (doubling the delay between retries)
+        with a maximum of 5 retry attempts.
+    - Stops retrying if the exception is due to a client-side error (HTTP 4xx),
+        as these are typically non-recoverable. The single exception is 429 (Too Many Requests).
+
+    Parameters:
+    - `url` (str): The URL to which the HTTP request is sent.
+    - `method` (str, optional): The HTTP method to use (default is 'GET').
+
+    Returns:
+    - `response` (requests.Response): The HTTP response object.
+
+    Notes:
+    - This function leverages the `backoff` library for retry strategies and logging.
+    - A session object (assumed to be pre-configured) is used for making the HTTP request.
+    """
+    return session.request(method=method, url=url, json=json)
 
 # pylint: disable=dangerous-default-value
 def authed_get(source, url, headers={}):
@@ -229,12 +281,12 @@ def authed_get(source, url, headers={}):
         session.headers.update(headers)
         # Uncomment for debugging
         #logger.info("requesting {}".format(url))
-        resp = session.request(method='get', url=url)
+        resp = request(url, method='get')
 
         if resp.status_code != 200:
             raise_for_error(resp, source, url)
         timer.tags[metrics.Tag.http_status_code] = resp.status_code
-        rate_throttling(resp)
+        timer.tags['url'] = url
         return resp
 
 # pylint: disable=dangerous-default-value
@@ -243,12 +295,12 @@ def authed_post(source, url, json, headers={}):
         session.headers.update(headers)
         # Uncomment for debugging
         #logger.info("requesting {}".format(url))
-        resp = session.request(method='post', url=url, json=json)
+        resp = request(url, method='post', json=json)
 
         if resp.status_code != 200:
             raise_for_error(resp, source, url)
         timer.tags[metrics.Tag.http_status_code] = resp.status_code
-        rate_throttling(resp)
+        timer.tags['url'] = url
         return resp
 
 PAGE_SIZE = 100
