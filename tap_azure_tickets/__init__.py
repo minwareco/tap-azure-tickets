@@ -217,30 +217,6 @@ def raise_for_error(resp, source, url):
     exc = ERROR_CODE_EXCEPTION_MAPPING.get(error_code, {}).get("raise_exception", AzureException)
     raise exc(message) from None
 
-def get_backoff_value_generator():
-    tries = 0
-    def backoff_value(response):
-        nonlocal tries
-        tries += 1
-        with suppress(TypeError, ValueError, AttributeError):
-            return int(response.headers.get("Retry-After"))
-        return 30 * (2 ** tries)
-
-    return backoff_value
-
-@backoff.on_exception(backoff.expo,
-                      (requests.exceptions.RequestException),
-                      max_tries=5,
-                      giveup=lambda e: e.response is not None and e.response.status_code != 429 and 400 <= e.response.status_code < 500,
-                      factor=5,
-                      jitter=backoff.random_jitter,
-                      logger=logger)
-@backoff.on_predicate(backoff.runtime,
-                      predicate=lambda r: r.headers.get("Retry-After", None) != None or r.status_code >= 300,
-                      max_tries=5,
-                      value=get_backoff_value_generator(),
-                      jitter=backoff.random_jitter,
-                      logger=logger)
 def request(source, url, method='GET', json=None):
     """
     This function performs an HTTP request and implements a robust retry mechanism
@@ -274,19 +250,51 @@ def request(source, url, method='GET', json=None):
     - This function leverages the `backoff` library for retry strategies and logging.
     - A session object (assumed to be pre-configured) is used for making the HTTP request.
     """
-    with metrics.http_request_timer(source) as timer:
-        timer.tags['url'] = url
 
-        response = session.request(method=method, url=url, json=json)
+    exponential_factor = 5
+    tries = 0
+    def backoff_value(response):
+        nonlocal tries
+        with suppress(TypeError, ValueError, AttributeError):
+            return int(response.headers.get("Retry-After"))
+        backoff_time = exponential_factor * (2 ** tries)
+        tries += 1
+        return backoff_time
 
-        timer.tags[metrics.Tag.http_status_code] = response.status_code
-        timer.tags['header_retry-after'] = response.headers.get('retry-after')
-        timer.tags['header_x-ratelimit-resource'] = response.headers.get('x-ratelimit-resource')
-        timer.tags['header_x-ratelimit-delay'] = response.headers.get('x-ratelimit-delay')
-        timer.tags['header_x-ratelimit-limit'] = response.headers.get('x-ratelimit-limit')
-        timer.tags['header_x-ratelimit-remaining'] = response.headers.get('x-ratelimit-remaining')
-        timer.tags['header_x-ratelimit-reset'] = response.headers.get('x-ratelimit-reset')
-        return response
+    def execute_request(source, url, method='GET', json=None):
+        with metrics.http_request_timer(source) as timer:
+            timer.tags['url'] = url
+
+            response = session.request(method=method, url=url, json=json)
+
+            timer.tags[metrics.Tag.http_status_code] = response.status_code
+            timer.tags['header_retry-after'] = response.headers.get('retry-after')
+            timer.tags['header_x-ratelimit-resource'] = response.headers.get('x-ratelimit-resource')
+            timer.tags['header_x-ratelimit-delay'] = response.headers.get('x-ratelimit-delay')
+            timer.tags['header_x-ratelimit-limit'] = response.headers.get('x-ratelimit-limit')
+            timer.tags['header_x-ratelimit-remaining'] = response.headers.get('x-ratelimit-remaining')
+            timer.tags['header_x-ratelimit-reset'] = response.headers.get('x-ratelimit-reset')
+
+            return response
+
+    backoff_on_exception = backoff.on_exception(backoff.expo,
+                      (requests.exceptions.RequestException),
+                      max_tries=7,
+                      max_time=3600,
+                      giveup=lambda e: e.response is not None and e.response.status_code != 429 and 400 <= e.response.status_code < 500,
+                      factor=exponential_factor,
+                      jitter=backoff.random_jitter,
+                      logger=logger)
+
+    backoff_on_predicate = backoff.on_predicate(backoff.runtime,
+                      predicate=lambda r: r.headers.get("Retry-After", None) != None or r.status_code >= 300,
+                      max_tries=7,
+                      max_time=3600,
+                      value=backoff_value,
+                      jitter=backoff.random_jitter,
+                      logger=logger)
+
+    return backoff_on_exception(backoff_on_predicate(execute_request))(source, url, method, json)
 
 # pylint: disable=dangerous-default-value
 def authed_get(source, url, headers={}):
