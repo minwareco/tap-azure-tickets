@@ -217,6 +217,14 @@ def raise_for_error(resp, source, url):
     exc = ERROR_CODE_EXCEPTION_MAPPING.get(error_code, {}).get("raise_exception", AzureException)
     raise exc(message) from None
 
+# Ignore specific exception
+# This exception occurs when the permissions don't allow access to a specific board
+# There is no simple way to verify access before this occurs
+ignored_exceptions = [
+    'TF400497: The backlog iteration path that you specified is no longer valid.',
+    'TF400499: You have not set your team field.'
+]
+
 def request(source, url, method='GET', json=None):
     """
     This function performs an HTTP request and implements a robust retry mechanism
@@ -287,7 +295,11 @@ def request(source, url, method='GET', json=None):
                       logger=logger)
 
     backoff_on_predicate = backoff.on_predicate(backoff.runtime,
-                      predicate=lambda r: r.headers.get("Retry-After", None) != None or r.status_code >= 300,
+                      predicate=lambda r:
+                        r.headers.get("Retry-After", None) != None or (
+                            r.status_code >= 300 and not
+                            any(ignored_ex in r.text for ignored_ex in ignored_exceptions)
+                        ),
                       max_tries=7,
                       max_time=3600,
                       value=backoff_value,
@@ -521,15 +533,8 @@ def sync_all_boards(schema, org, project, teams, state, mdata, start_date):
                 emit_records(streamId, schema, org, project, boards, extraction_time, counter, mdata)
         except InternalServerError as ex:
             ex_str = str(ex)
-            # Ignore specific exception
-            # This exception occurs when the permissions don't allow access to a specific board
-            # There is no simple way to verify access before this occurs
-            ignored_exceptions = [
-                'TF400497: The backlog iteration path that you specified is no longer valid.',
-                'TF400499: You have not set your team field.'
-            ]
             if any(ignored_ex in ex_str for ignored_ex in ignored_exceptions):
-                logger.warning(ex, exc_info=True)
+                logger.warning("Ignoring handled internal server error for boards: %s", ex_str)
             else:
                 raise ex
     return state
@@ -835,10 +840,12 @@ def do_sync(config, state, catalog):
     # load all the projects which match the filter provided by our config
     projects = get_selected_projects(config['org'], config['projects'])
 
+    # logger.info("Projects: %s", projects)
+
     # for each project, run each selected steam procesor
     is_schema_written = {}
     for project in projects:
-        logger.info("Starting sync of project: %s", project['name'])
+        logger.info("Starting sync of project: %s using start date: %s", project['name'], start_date)
 
         teams = get_teams_for_project(org, project['id'])
 
