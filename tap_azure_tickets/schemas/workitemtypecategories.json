@@ -1,0 +1,19 @@
+{
+  "title": "WorkItemTypeCategory",
+  "type": [
+    "null",
+    "object"
+  ],
+  "properties": {
+    "_sdc_id": {
+      "type": [
+        "string"
+      ]
+    },
+    "object": {
+      "type": [
+        "string"
+      ]
+    }
+  }
+}

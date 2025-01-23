@@ -1,3 +1,4 @@
+import hashlib
 import os
 import json
 import functools
@@ -34,8 +35,11 @@ KEY_PROPERTIES = {
     'iterations': ['id'],
     'projects': ['id'],
     'teams': ['id'],
+    'teammembers': ['id'],
     'updates': ['id'],
     'workitems': ['id'],
+    'workitemtypes': ['id'],
+    'workitemtypecategories': ['id'],
 }
 
 API_VERSION = "6.0"
@@ -493,9 +497,42 @@ def translateObject(object, org, projectId):
     objectCopy['org'] = org
     objectCopy['project'] = projectId
     return {
-        'id': object['id'],
+        'id': object['id'] if 'id' in object else object['url'],
         'object': json.dumps(objectCopy),
     }
+
+def emit_records(streamId, schema, org, project, objects, extraction_time, counter, mdata):
+    mdataMap = metadata.to_map(mdata)
+    for object in objects:
+        with singer.Transformer() as transformer:
+            rec = transformer.transform(object, schema, metadata=mdataMap)
+        singer.write_record(streamId, rec, time_extracted=extraction_time)
+        if counter:
+            counter.increment()
+
+# Skip emitting data if the whole response is exactly the same as last time
+def checkOutputState(outputItems, state, streamId, projectId):
+    dataHash = hashlib.md5(json.dumps(outputItems).encode()).hexdigest()
+
+    bookmark = bookmarks.get_bookmark(state, projectId, streamId)
+    if bookmark:
+        existingHash = bookmark.get('hash')
+    else:
+        existingHash = None
+
+    # Not changed, we're done
+    if existingHash == dataHash:
+        return None
+
+    return dataHash
+
+def emit_bookmark_records(streamId, schema, org, project, objects, extraction_time, counter, mdata, state, bookmarkId):
+    bookmarkHash = checkOutputState(objects, state, bookmarkId, project['id'])
+    if bookmarkHash:
+        emit_records(streamId, schema, org, project, objects, extraction_time, counter, mdata)
+        singer.write_bookmark(state, project['id'], bookmarkId, {
+            'hash': bookmarkHash
+        })
 
 def sync_all_boards(schema, org, project, teams, state, mdata, start_date):
     # bookmarks not used for this stream
@@ -505,18 +542,31 @@ def sync_all_boards(schema, org, project, teams, state, mdata, start_date):
     with metrics.record_counter(streamId) as counter:
         extraction_time = singer.utils.now()
         try:
+            pageNum = 0
             for response in authed_get_all_pages(
                 'boards',
                 "https://dev.azure.com/{}/{}/_apis/work/boards?api-version={}".format(org, project['id'], API_VERSION),
                 '$top',
                 '$skip'
             ):
+                pageNum += 1
                 boards = response.json()['value']
 
                 # Convert to ID + JSON, including org and project
                 outputItems = list(map(lambda item: translateObject(item, org, project['id']), boards))
 
-                emit_records(streamId, schema, org, project, outputItems, extraction_time, counter, mdata)
+                emit_bookmark_records(
+                    streamId,
+                    schema,
+                    org,
+                    project,
+                    outputItems,
+                    extraction_time,
+                    counter,
+                    mdata,
+                    state,
+                    '/'.join([streamId, str(pageNum)])
+                )
         except InternalServerError as ex:
             ex_str = str(ex)
             if any(ignored_ex in ex_str for ignored_ex in ignored_exceptions):
@@ -525,8 +575,6 @@ def sync_all_boards(schema, org, project, teams, state, mdata, start_date):
                 raise ex
     return state
 
-
-
 def sync_all_iterations(schema, org, project, teams, state, mdata, start_date):
     # bookmarks not used for this stream
     streamId = 'iterations'
@@ -534,19 +582,166 @@ def sync_all_iterations(schema, org, project, teams, state, mdata, start_date):
 
     with metrics.record_counter(streamId) as counter:
         extraction_time = singer.utils.now()
+        pageNum = 0
         for response in authed_get_all_pages(
-            'boards',
+            'iterations',
             "https://dev.azure.com/{}/{}/_apis/work/teamsettings/iterations?api-version={}".format(org, project['id'], API_VERSION),
             '$top',
             '$skip'
         ):
+            pageNum += 1
             iterations = response.json()['value']
 
             # Convert to ID + JSON, including org and project
             outputItems = list(map(lambda item: translateObject(item, org, project['id']), iterations))
 
-            emit_records(streamId, schema, org, project, outputItems, extraction_time, counter, mdata)
+            emit_bookmark_records(
+                streamId,
+                schema,
+                org,
+                project,
+                outputItems,
+                extraction_time,
+                counter,
+                mdata,
+                state,
+                '/'.join([streamId, str(pageNum)])
+            )
     return state
+
+def sync_all_work_item_types(schema, org, project, teams, state, mdata, start_date):
+    # bookmarks not used for this stream
+    streamId = 'workitemtypes'
+    logger.info("Syncing all work item types")
+
+    with metrics.record_counter(streamId) as counter:
+        extraction_time = singer.utils.now()
+
+        pageNum = 0
+        for response in authed_get_all_pages(
+            'workitemtypes',
+            "https://dev.azure.com/{}/{}/_apis/wit/workitemtypes?api-version={}".format(org, project['id'], API_VERSION),
+            '$top',
+            '$skip'
+        ):
+            pageNum += 1
+            workitemtypes = response.json()['value']
+
+            # Convert to ID + JSON, including org and project
+            outputItems = list(map(lambda item: translateObject(item, org, project['id']), workitemtypes))
+
+            emit_bookmark_records(
+                streamId,
+                schema,
+                org,
+                project,
+                outputItems,
+                extraction_time,
+                counter,
+                mdata,
+                state,
+                '/'.join([streamId, str(pageNum)])
+            )
+    return state
+
+def sync_all_work_item_type_categories(schema, org, project, teams, state, mdata, start_date):
+    # bookmarks not used for this stream
+    streamId = 'workitemtypecategories'
+    logger.info("Syncing all work item type categories")
+
+    with metrics.record_counter(streamId) as counter:
+        extraction_time = singer.utils.now()
+
+        pageNum = 0
+        for response in authed_get_all_pages(
+            'workitemtypecategories',
+            "https://dev.azure.com/{}/{}/_apis/wit/workitemtypecategories?api-version={}".format(org, project['id'], API_VERSION),
+            '$top',
+            '$skip'
+        ):
+            pageNum += 1
+            workitemtypecategories = response.json()['value']
+
+            # Convert to ID + JSON, including org and project
+            outputItems = list(map(lambda item: translateObject(item, org, project['id']), workitemtypecategories))
+
+            emit_bookmark_records(
+                streamId,
+                schema,
+                org,
+                project,
+                outputItems,
+                extraction_time,
+                counter,
+                mdata,
+                state,
+                '/'.join([streamId, str(pageNum)])
+            )
+
+    return state
+
+def sync_all_team_members(schema, org, project, teams, state, mdata, start_date):
+    # bookmarks not used for this stream
+    streamId = 'teammembers'
+    logger.info("Syncing all team members")
+
+    with metrics.record_counter(streamId) as counter:
+        extraction_time = singer.utils.now()
+
+        for team in teams:
+            teamId = team['id']
+
+            pageNum = 0
+            for response in authed_get_all_pages(
+                'teammembers',
+                "https://dev.azure.com/{}/_apis/projects/{}/teams/{}/members?api-version={}".format(
+                    org, project['id'], teamId, API_VERSION),
+                '$top',
+                '$skip'
+            ):
+                pageNum += 1
+                teammembers = response.json()['value']
+
+                # Convert to ID + JSON, including org and project
+                outputItems = list(map(lambda item: translateTeamMember(item, org, project['id'], teamId), teammembers))
+
+                emit_bookmark_records(
+                    streamId,
+                    schema,
+                    org,
+                    project,
+                    outputItems,
+                    extraction_time,
+                    counter,
+                    mdata,
+                    state,
+                    '/'.join([streamId, teamId, str(pageNum)])
+                )
+
+    return state
+
+
+
+def get_bookmark(state, project_id, stream_name, bookmark_key, default_value=None):
+    project_stream_dict = bookmarks.get_bookmark(state, project_id, stream_name)
+    if project_stream_dict:
+        return project_stream_dict.get(bookmark_key)
+    if default_value:
+        return default_value
+    return None
+
+
+def translateTeamMember(item, org, projectId, teamId):
+    itemCopy = item['identity'].copy()
+    itemCopy['org'] = org
+    itemCopy['project'] = projectId
+    itemCopy['team'] = teamId
+    # Create ID for this relation using ID of team and person
+    return {
+        'id': '/'.join([teamId, itemCopy['id']]),
+        'object': json.dumps(itemCopy),
+    }
+
 
 def sync_all_workitems(schema, org, project, teams, state, mdata, start_date):
     global workItemIds
@@ -712,7 +907,19 @@ def sync_all_teams(schema, org, project, teams, state, mdata, start_date):
         extraction_time = singer.utils.now()
         # Convert to ID + JSON, including org and project
         outputItems = list(map(lambda item: translateObject(item, org, project['id']), teams))
-        emit_records(streamId, schema, org, project, outputItems, extraction_time, counter, mdata)
+
+        emit_bookmark_records(
+            streamId,
+            schema,
+            org,
+            project,
+            outputItems,
+            extraction_time,
+            counter,
+            mdata,
+            state,
+            streamId
+        )
     return state
 
 def sync_project(schema, org, project, teams, state, mdata, start_date):
@@ -723,18 +930,20 @@ def sync_project(schema, org, project, teams, state, mdata, start_date):
         extraction_time = singer.utils.now()
         # Convert to ID + JSON, including org and project
         outputItems = list(map(lambda item: translateObject(item, org, project['id']), [project]))
-        emit_records(streamId, schema, org, project, outputItems, extraction_time, counter, mdata)
+
+        emit_bookmark_records(
+            streamId,
+            schema,
+            org,
+            project,
+            outputItems,
+            extraction_time,
+            counter,
+            mdata,
+            state,
+            streamId
+        )
     return state
-
-def emit_records(streamId, schema, org, project, objects, extraction_time, counter, mdata):
-    mdataMap = metadata.to_map(mdata)
-    for object in objects:
-        with singer.Transformer() as transformer:
-            rec = transformer.transform(object, schema, metadata=mdataMap)
-        singer.write_record(streamId, rec, time_extracted=extraction_time)
-        if counter:
-            counter.increment()
-
 
 def get_selected_streams(catalog):
     '''
@@ -758,8 +967,11 @@ SYNC_FUNCTIONS = {
     'iterations': sync_all_iterations,
     'projects': sync_project,
     'teams': sync_all_teams,
+    'teammembers': sync_all_team_members,
     'workitems': sync_all_workitems,
     'updates': sync_all_updates,
+    'workitemtypes': sync_all_work_item_types,
+    'workitemtypecategories': sync_all_work_item_type_categories,
 }
 
 SUB_STREAMS = {
