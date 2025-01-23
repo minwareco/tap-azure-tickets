@@ -811,8 +811,6 @@ def sync_all_workitems(schema, org, project, teams, state, mdata, start_date):
                 emit_records(streamId, schema, org, project, outputItems, extraction_time, counter, mdata)
 
                 # Query and emit update records for each work item
-
-                # add item ids to the global work item IDs for sub-streams to process (e.g. updates)
                 for workItemId in batchItemIds:
                     sync_updates_for_work_item(
                         schema,
@@ -1010,6 +1008,21 @@ def do_sync(config, state, catalog):
 
     # for each project, run each selected steam procesor
     is_schema_written = {}
+
+    # Just write out updates schema right away since it is a sub-stream
+    updatesSchema = None
+    updatesKeyProperties = None
+    for stream in catalog['streams']:
+        stream_id = stream['tap_stream_id']
+        stream_schema = stream['schema']
+        if stream_id == 'updates':
+            updatesSchema = stream_schema
+            updatesKeyProperties = stream['key_properties']
+            break
+    if updatesSchema:
+        singer.write_schema('updates', updatesSchema, updatesKeyProperties)
+        is_schema_written['updates'] = True
+
     for project in projects:
         logger.info("Starting sync of project: %s using start date: %s", project['name'], start_date)
 
