@@ -10,51 +10,8 @@
         "string"
       ]
     },
-    "org": {
+    "object": {
       "type": [
-        "string"
-      ]
-    },
-    "project": {
-      "type": [
-        "string"
-      ]
-    },
-    "name": {
-      "type": [
-        "null",
-        "string"
-      ]
-    },
-    "path": {
-      "type": [
-        "null",
-        "string"
-      ]
-    },
-    "startDate": {
-      "type": [
-        "null",
-        "string"
-      ],
-      "format": "date-time"
-    },
-    "finishDate": {
-      "type": [
-        "null",
-        "string"
-      ],
-      "format": "date-time"
-    },
-    "timeFrame": {
-      "type": [
-        "null",
-        "string"
-      ]
-    },
-    "url": {
-      "type": [
-        "null",
         "string"
       ]
     }

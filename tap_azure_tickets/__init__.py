@@ -21,33 +21,6 @@ logger = singer.get_logger()
 # globals which hold data across streams
 workItemIds = set()
 
-# map of Azure field names to more usable/readable field names
-FIELD_MAP = {
-    "System.Id": "id",
-    "System.AssignedTo": "assignedTo",
-    "Microsoft.VSTS.Common.ClosedBy": "closedBy",
-    "Microsoft.VSTS.Common.ClosedDate": "closedDate",
-    "Microsoft.VSTS.CodeReview.ClosedStatus": "closedStatus",
-    "Microsoft.VSTS.CodeReview.ClosedStatusCode": "closedStatusCode",
-    "System.ChangedDate": "changedDate",
-    "System.ChangedBy": "changedBy",
-    "System.CreatedBy": "createdBy",
-    "System.CreatedDate": "createdDate",
-    "System.Description": "description",
-    "Microsoft.VSTS.Scheduling.Effort": "effort",
-    "Microsoft.VSTS.Scheduling.FinishDate": "finishDate",
-    "Microsoft.VSTS.Common.Priority": "priority",
-    "Microsoft.VSTS.Common.ResolvedBy": "resolvedBy",
-    "Microsoft.VSTS.Common.ResolvedDate": "resolvedDate",
-    "Microsoft.VSTS.Common.StackRank": "stackRank",
-    "Microsoft.VSTS.Scheduling.StartDate": "startDate",
-    "System.State": "state",
-    "Microsoft.VSTS.Common.StateChangeDate": "stateChangeDate",
-    "System.IterationPath": "iterationPath",
-    "System.Title": "title",
-    "System.WorkItemType": "type",
-}
-
 REQUIRED_CONFIG_KEYS = [
     'start_date',
     'user_name',
@@ -61,8 +34,8 @@ KEY_PROPERTIES = {
     'iterations': ['id'],
     'projects': ['id'],
     'teams': ['id'],
-    'updates': ['_sdc_id'],
-    'workitems': ['_sdc_id'],
+    'updates': ['id'],
+    'workitems': ['id'],
 }
 
 API_VERSION = "6.0"
@@ -515,6 +488,15 @@ def get_teams_for_project(org, projectId):
 
     return teams
 
+def translateObject(object, org, projectId):
+    objectCopy = object.copy()
+    objectCopy['org'] = org
+    objectCopy['project'] = projectId
+    return {
+        'id': object['id'],
+        'object': json.dumps(objectCopy),
+    }
+
 def sync_all_boards(schema, org, project, teams, state, mdata, start_date):
     # bookmarks not used for this stream
     streamId = 'boards'
@@ -530,7 +512,11 @@ def sync_all_boards(schema, org, project, teams, state, mdata, start_date):
                 '$skip'
             ):
                 boards = response.json()['value']
-                emit_records(streamId, schema, org, project, boards, extraction_time, counter, mdata)
+
+                # Convert to ID + JSON, including org and project
+                outputItems = list(map(lambda item: translateObject(item, org, project['id']), boards))
+
+                emit_records(streamId, schema, org, project, outputItems, extraction_time, counter, mdata)
         except InternalServerError as ex:
             ex_str = str(ex)
             if any(ignored_ex in ex_str for ignored_ex in ignored_exceptions):
@@ -538,6 +524,8 @@ def sync_all_boards(schema, org, project, teams, state, mdata, start_date):
             else:
                 raise ex
     return state
+
+
 
 def sync_all_iterations(schema, org, project, teams, state, mdata, start_date):
     # bookmarks not used for this stream
@@ -554,14 +542,10 @@ def sync_all_iterations(schema, org, project, teams, state, mdata, start_date):
         ):
             iterations = response.json()['value']
 
-            # flatten out some properties for convenience
-            for iteration in iterations:
-                attributes = iteration.get('attributes') or {}
-                iteration['startDate'] = attributes.get('startDate')
-                iteration['finishDate'] = attributes.get('finishDate')
-                iteration['timeFrame'] = attributes.get('timeFrame')
+            # Convert to ID + JSON, including org and project
+            outputItems = list(map(lambda item: translateObject(item, org, project['id']), iterations))
 
-            emit_records(streamId, schema, org, project, iterations, extraction_time, counter, mdata)
+            emit_records(streamId, schema, org, project, outputItems, extraction_time, counter, mdata)
     return state
 
 def sync_all_workitems(schema, org, project, teams, state, mdata, start_date):
@@ -621,7 +605,8 @@ def sync_all_workitems(schema, org, project, teams, state, mdata, start_date):
                 batchItemIds = list(map(lambda item: item['id'], batchItemRefs))
                 body = {
                     "ids": batchItemIds,
-                    "fields": list(dict.keys(FIELD_MAP)),
+                    # Omitting this gets all the fields
+                    # "fields": list(dict.keys(FIELD_MAP)),
                 }
                 startIndex += pageSize
                 response = authed_post(
@@ -631,17 +616,19 @@ def sync_all_workitems(schema, org, project, teams, state, mdata, start_date):
                     headers,
                 )
                 items = response.json()['value']
-                normalizedItems = list(map(lambda item: normalize_work_item(item, org, FIELD_MAP), items))
+                # Advance changed date to max of all items
                 from_change_date = max(
                     list(
-                        map(lambda item: item['changedDate'], normalizedItems)
+                        map(lambda item: item['fields']['System.ChangedDate'], items)
                     )
                 )
-
                 # add item ids to the global work item IDs for sub-streams to process (e.g. updates)
                 workItemIds.update(batchItemIds)
 
-                emit_records(streamId, schema, org, project, normalizedItems, extraction_time, counter, mdata)
+                # Convert to ID + JSON, including org and project
+                outputItems = list(map(lambda item: translateWorkItem(item, org, project['id']), items))
+
+                emit_records(streamId, schema, org, project, outputItems, extraction_time, counter, mdata)
 
     singer.write_bookmark(state, project['id'], streamId, {
         'since': singer.utils.strftime(extraction_time),
@@ -652,20 +639,16 @@ def sync_all_workitems(schema, org, project, teams, state, mdata, start_date):
 def generate_sdc_id(org, id):
     return "{}/{}".format(org, id)
 
-def normalize_work_item(item, org, fieldMap):
+def translateWorkItem(item, org, projectId):
+    itemCopy = item.copy()
+    itemCopy['org'] = org
+    itemCopy['project'] = projectId
     # derive our own ID because unfortunately the ID of a work item is not a UUID
     # and instead is an incrementing integer within an Azure org
-    normalizedItem = {
-        "_sdc_id": generate_sdc_id(org, item['id'])
+    return {
+        'id': generate_sdc_id(org, item['id']),
+        'object': json.dumps(itemCopy),
     }
-
-    # for each field in the raw work item from Azure, use its mapped name to set the field
-    # value into the normalized item
-    for fieldName, fieldValue in item['fields'].items():
-        normalizedFieldName = fieldMap[fieldName]
-        normalizedItem[normalizedFieldName] = fieldValue
-
-    return normalizedItem
 
 def sync_all_updates(schema, org, project, teams, state, mdata, start_date):
     global workItemIds
@@ -697,28 +680,9 @@ def sync_all_updates(schema, org, project, teams, state, mdata, start_date):
                     if revisedDate < bookmarkDate:
                         continue
 
-                    # convert the dict of <string, WorkItemFieldUpdate> to an array of objects suitable
-                    # for our desired output schema, which is an array of update objects.
-                    # WorkItemFieldUpdate: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/updates/list?view=azure-devops-rest-7.1&tabs=HTTP#workitemfieldupdate
-                    normalizedFields = []
-                    # If the only change was adding / removing a relation
-                    # no fields are changed
-                    if 'fields' in update:
-                        for fieldName, values in update['fields'].items():
-                            fieldName = FIELD_MAP.get(fieldName)
-                            if fieldName is not None:
-                                normalizedFields.append({
-                                    "fieldName": fieldName,
-                                    "oldValue": normalize_value_to_string(values.get('oldValue')),
-                                    "newValue": normalize_value_to_string(values.get('newValue')),
-                                })
-
-                    # derive our own ID because unfortunately the ID of an update is not a UUID
-                    # and instead is an incrementing integer within an Azure org
-                    update['_sdc_id'] = generate_sdc_id(org, update['id'])
-                    update['workItemSdcId'] = generate_sdc_id(org, update['workItemId'])
-                    update['fields'] = normalizedFields
-                    updatesToProcess.append(update)
+                    # Convert to ID + JSON, including org and project
+                    outputUpdate = translateUpdate(update, org, project['id'])
+                    updatesToProcess.append(outputUpdate)
 
                 emit_records(streamId, schema, org, project, updatesToProcess, extraction_time, counter, mdata)
 
@@ -728,15 +692,17 @@ def sync_all_updates(schema, org, project, teams, state, mdata, start_date):
 
     return state
 
-def normalize_value_to_string(value):
-    if value is None:
-        return value
-    if isinstance(value, str):
-        return value
-    elif isinstance(value, dict):
-        return json.dumps(value)
-    else:
-        return str(value) # probably a number or boolean
+def translateUpdate(update, org, projectId):
+    updateCopy = update.copy()
+    updateCopy['org'] = org
+    updateCopy['project'] = projectId
+    updateCopy['workItemSdcId'] = generate_sdc_id(org, update['workItemId'])
+    # derive our own ID because unfortunately the ID of a work item is not a UUID
+    # and instead is an incrementing integer within an Azure org
+    return {
+        'id': generate_sdc_id(org, update['id']),
+        'object': json.dumps(updateCopy),
+    }
 
 def sync_all_teams(schema, org, project, teams, state, mdata, start_date):
     # bookmarks not used for this stream
@@ -744,7 +710,9 @@ def sync_all_teams(schema, org, project, teams, state, mdata, start_date):
     logger.info("Syncing all teams")
     with metrics.record_counter(streamId) as counter:
         extraction_time = singer.utils.now()
-        emit_records(streamId, schema, org, project, teams, extraction_time, counter, mdata)
+        # Convert to ID + JSON, including org and project
+        outputItems = list(map(lambda item: translateObject(item, org, project['id']), teams))
+        emit_records(streamId, schema, org, project, outputItems, extraction_time, counter, mdata)
     return state
 
 def sync_project(schema, org, project, teams, state, mdata, start_date):
@@ -753,14 +721,14 @@ def sync_project(schema, org, project, teams, state, mdata, start_date):
     logger.info("Syncing project %s (ID = %s)", project.get('name'), project.get('id'))
     with metrics.record_counter(streamId) as counter:
         extraction_time = singer.utils.now()
-        emit_records(streamId, schema, org, project, [project], extraction_time, counter, mdata)
+        # Convert to ID + JSON, including org and project
+        outputItems = list(map(lambda item: translateObject(item, org, project['id']), [project]))
+        emit_records(streamId, schema, org, project, outputItems, extraction_time, counter, mdata)
     return state
 
 def emit_records(streamId, schema, org, project, objects, extraction_time, counter, mdata):
     mdataMap = metadata.to_map(mdata)
     for object in objects:
-        object['org'] = org
-        object['project'] = project['id']
         with singer.Transformer() as transformer:
             rec = transformer.transform(object, schema, metadata=mdataMap)
         singer.write_record(streamId, rec, time_extracted=extraction_time)
