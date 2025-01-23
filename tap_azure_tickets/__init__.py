@@ -1,3 +1,4 @@
+import hashlib
 import os
 import json
 import functools
@@ -18,36 +19,6 @@ from singer import metadata
 session = requests.Session()
 logger = singer.get_logger()
 
-# globals which hold data across streams
-workItemIds = set()
-
-# map of Azure field names to more usable/readable field names
-FIELD_MAP = {
-    "System.Id": "id",
-    "System.AssignedTo": "assignedTo",
-    "Microsoft.VSTS.Common.ClosedBy": "closedBy",
-    "Microsoft.VSTS.Common.ClosedDate": "closedDate",
-    "Microsoft.VSTS.CodeReview.ClosedStatus": "closedStatus",
-    "Microsoft.VSTS.CodeReview.ClosedStatusCode": "closedStatusCode",
-    "System.ChangedDate": "changedDate",
-    "System.ChangedBy": "changedBy",
-    "System.CreatedBy": "createdBy",
-    "System.CreatedDate": "createdDate",
-    "System.Description": "description",
-    "Microsoft.VSTS.Scheduling.Effort": "effort",
-    "Microsoft.VSTS.Scheduling.FinishDate": "finishDate",
-    "Microsoft.VSTS.Common.Priority": "priority",
-    "Microsoft.VSTS.Common.ResolvedBy": "resolvedBy",
-    "Microsoft.VSTS.Common.ResolvedDate": "resolvedDate",
-    "Microsoft.VSTS.Common.StackRank": "stackRank",
-    "Microsoft.VSTS.Scheduling.StartDate": "startDate",
-    "System.State": "state",
-    "Microsoft.VSTS.Common.StateChangeDate": "stateChangeDate",
-    "System.IterationPath": "iterationPath",
-    "System.Title": "title",
-    "System.WorkItemType": "type",
-}
-
 REQUIRED_CONFIG_KEYS = [
     'start_date',
     'user_name',
@@ -61,8 +32,11 @@ KEY_PROPERTIES = {
     'iterations': ['id'],
     'projects': ['id'],
     'teams': ['id'],
-    'updates': ['_sdc_id'],
-    'workitems': ['_sdc_id'],
+    'teammembers': ['id'],
+    'updates': ['id'],
+    'workitems': ['id'],
+    'workitemtypes': ['id'],
+    'workitemtypecategories': ['id'],
 }
 
 API_VERSION = "6.0"
@@ -515,6 +489,49 @@ def get_teams_for_project(org, projectId):
 
     return teams
 
+def translateObject(object, org, projectId):
+    objectCopy = object.copy()
+    objectCopy['org'] = org
+    objectCopy['project'] = projectId
+    return {
+        'id': object['id'] if 'id' in object else object['url'],
+        'object': json.dumps(objectCopy),
+    }
+
+def emit_records(streamId, schema, org, project, objects, extraction_time, counter, mdata):
+    mdataMap = metadata.to_map(mdata)
+    for object in objects:
+        with singer.Transformer() as transformer:
+            rec = transformer.transform(object, schema, metadata=mdataMap)
+        singer.write_record(streamId, rec, time_extracted=extraction_time)
+        if counter:
+            counter.increment()
+
+# Skip emitting data if the whole response is exactly the same as last time
+def checkOutputState(outputItems, state, streamId, projectId):
+    dataHash = hashlib.md5(json.dumps(outputItems).encode()).hexdigest()
+
+    bookmark = bookmarks.get_bookmark(state, projectId, streamId)
+    if bookmark:
+        existingHash = bookmark.get('hash')
+    else:
+        existingHash = None
+
+    # Not changed, we're done
+    if existingHash == dataHash:
+        return None
+
+    return dataHash
+
+def emit_bookmark_records(streamId, schema, org, project, objects, extraction_time, counter, mdata, state, bookmarkId):
+    bookmarkHash = checkOutputState(objects, state, bookmarkId, project['id'])
+    if bookmarkHash:
+        emit_records(streamId, schema, org, project, objects, extraction_time, counter, mdata)
+        singer.write_bookmark(state, project['id'], bookmarkId, {
+            'hash': bookmarkHash
+        })
+        singer.write_state(state)
+
 def sync_all_boards(schema, org, project, teams, state, mdata, start_date):
     # bookmarks not used for this stream
     streamId = 'boards'
@@ -523,14 +540,31 @@ def sync_all_boards(schema, org, project, teams, state, mdata, start_date):
     with metrics.record_counter(streamId) as counter:
         extraction_time = singer.utils.now()
         try:
+            pageNum = 0
             for response in authed_get_all_pages(
                 'boards',
                 "https://dev.azure.com/{}/{}/_apis/work/boards?api-version={}".format(org, project['id'], API_VERSION),
                 '$top',
                 '$skip'
             ):
+                pageNum += 1
                 boards = response.json()['value']
-                emit_records(streamId, schema, org, project, boards, extraction_time, counter, mdata)
+
+                # Convert to ID + JSON, including org and project
+                outputItems = list(map(lambda item: translateObject(item, org, project['id']), boards))
+
+                emit_bookmark_records(
+                    streamId,
+                    schema,
+                    org,
+                    project,
+                    outputItems,
+                    extraction_time,
+                    counter,
+                    mdata,
+                    state,
+                    '/'.join([streamId, str(pageNum)])
+                )
         except InternalServerError as ex:
             ex_str = str(ex)
             if any(ignored_ex in ex_str for ignored_ex in ignored_exceptions):
@@ -546,23 +580,155 @@ def sync_all_iterations(schema, org, project, teams, state, mdata, start_date):
 
     with metrics.record_counter(streamId) as counter:
         extraction_time = singer.utils.now()
+        pageNum = 0
         for response in authed_get_all_pages(
-            'boards',
+            'iterations',
             "https://dev.azure.com/{}/{}/_apis/work/teamsettings/iterations?api-version={}".format(org, project['id'], API_VERSION),
             '$top',
             '$skip'
         ):
+            pageNum += 1
             iterations = response.json()['value']
 
-            # flatten out some properties for convenience
-            for iteration in iterations:
-                attributes = iteration.get('attributes') or {}
-                iteration['startDate'] = attributes.get('startDate')
-                iteration['finishDate'] = attributes.get('finishDate')
-                iteration['timeFrame'] = attributes.get('timeFrame')
+            # Convert to ID + JSON, including org and project
+            outputItems = list(map(lambda item: translateObject(item, org, project['id']), iterations))
 
-            emit_records(streamId, schema, org, project, iterations, extraction_time, counter, mdata)
+            emit_bookmark_records(
+                streamId,
+                schema,
+                org,
+                project,
+                outputItems,
+                extraction_time,
+                counter,
+                mdata,
+                state,
+                '/'.join([streamId, str(pageNum)])
+            )
     return state
+
+def sync_all_work_item_types(schema, org, project, teams, state, mdata, start_date):
+    # bookmarks not used for this stream
+    streamId = 'workitemtypes'
+    logger.info("Syncing all work item types")
+
+    with metrics.record_counter(streamId) as counter:
+        extraction_time = singer.utils.now()
+
+        pageNum = 0
+        for response in authed_get_all_pages(
+            'workitemtypes',
+            "https://dev.azure.com/{}/{}/_apis/wit/workitemtypes?api-version={}".format(org, project['id'], API_VERSION),
+            '$top',
+            '$skip'
+        ):
+            pageNum += 1
+            workitemtypes = response.json()['value']
+
+            # Convert to ID + JSON, including org and project
+            outputItems = list(map(lambda item: translateObject(item, org, project['id']), workitemtypes))
+
+            emit_bookmark_records(
+                streamId,
+                schema,
+                org,
+                project,
+                outputItems,
+                extraction_time,
+                counter,
+                mdata,
+                state,
+                '/'.join([streamId, str(pageNum)])
+            )
+    return state
+
+def sync_all_work_item_type_categories(schema, org, project, teams, state, mdata, start_date):
+    # bookmarks not used for this stream
+    streamId = 'workitemtypecategories'
+    logger.info("Syncing all work item type categories")
+
+    with metrics.record_counter(streamId) as counter:
+        extraction_time = singer.utils.now()
+
+        pageNum = 0
+        for response in authed_get_all_pages(
+            'workitemtypecategories',
+            "https://dev.azure.com/{}/{}/_apis/wit/workitemtypecategories?api-version={}".format(org, project['id'], API_VERSION),
+            '$top',
+            '$skip'
+        ):
+            pageNum += 1
+            workitemtypecategories = response.json()['value']
+
+            # Convert to ID + JSON, including org and project
+            outputItems = list(map(lambda item: translateObject(item, org, project['id']), workitemtypecategories))
+
+            emit_bookmark_records(
+                streamId,
+                schema,
+                org,
+                project,
+                outputItems,
+                extraction_time,
+                counter,
+                mdata,
+                state,
+                '/'.join([streamId, str(pageNum)])
+            )
+
+    return state
+
+def sync_all_team_members(schema, org, project, teams, state, mdata, start_date):
+    # bookmarks not used for this stream
+    streamId = 'teammembers'
+    logger.info("Syncing all team members")
+
+    with metrics.record_counter(streamId) as counter:
+        extraction_time = singer.utils.now()
+
+        for team in teams:
+            teamId = team['id']
+
+            pageNum = 0
+            for response in authed_get_all_pages(
+                'teammembers',
+                "https://dev.azure.com/{}/_apis/projects/{}/teams/{}/members?api-version={}".format(
+                    org, project['id'], teamId, API_VERSION),
+                '$top',
+                '$skip'
+            ):
+                pageNum += 1
+                teammembers = response.json()['value']
+
+                # Convert to ID + JSON, including org and project
+                outputItems = list(map(lambda item: translateTeamMember(item, org, project['id'], teamId), teammembers))
+
+                emit_bookmark_records(
+                    streamId,
+                    schema,
+                    org,
+                    project,
+                    outputItems,
+                    extraction_time,
+                    counter,
+                    mdata,
+                    state,
+                    '/'.join([streamId, teamId, str(pageNum)])
+                )
+
+    return state
+
+def translateTeamMember(item, org, projectId, teamId):
+    itemCopy = item['identity'].copy()
+    itemCopy['org'] = org
+    itemCopy['project'] = projectId
+    itemCopy['team'] = teamId
+    # Create ID for this relation using ID of team and person
+    return {
+        'id': '/'.join([teamId, itemCopy['id']]),
+        'object': json.dumps(itemCopy),
+    }
+
 
 def sync_all_workitems(schema, org, project, teams, state, mdata, start_date):
     global workItemIds
@@ -621,7 +787,8 @@ def sync_all_workitems(schema, org, project, teams, state, mdata, start_date):
                 batchItemIds = list(map(lambda item: item['id'], batchItemRefs))
                 body = {
                     "ids": batchItemIds,
-                    "fields": list(dict.keys(FIELD_MAP)),
+                    # Omitting this gets all the fields
+                    # "fields": list(dict.keys(FIELD_MAP)),
                 }
                 startIndex += pageSize
                 response = authed_post(
@@ -631,112 +798,93 @@ def sync_all_workitems(schema, org, project, teams, state, mdata, start_date):
                     headers,
                 )
                 items = response.json()['value']
-                normalizedItems = list(map(lambda item: normalize_work_item(item, org, FIELD_MAP), items))
+                # Advance changed date to max of all items
                 from_change_date = max(
                     list(
-                        map(lambda item: item['changedDate'], normalizedItems)
+                        map(lambda item: item['fields']['System.ChangedDate'], items)
                     )
                 )
 
+                # Convert to ID + JSON, including org and project
+                outputItems = list(map(lambda item: translateWorkItem(item, org, project['id']), items))
+
+                emit_records(streamId, schema, org, project, outputItems, extraction_time, counter, mdata)
+
+                # Query and emit update records for each work item
+
                 # add item ids to the global work item IDs for sub-streams to process (e.g. updates)
-                workItemIds.update(batchItemIds)
+                for workItemId in batchItemIds:
+                    sync_updates_for_work_item(
+                        schema,
+                        org,
+                        project,
+                        workItemId,
+                        bookmarkDate,
+                        mdata,
+                    )
 
-                emit_records(streamId, schema, org, project, normalizedItems, extraction_time, counter, mdata)
-
-    singer.write_bookmark(state, project['id'], streamId, {
-        'since': singer.utils.strftime(extraction_time),
-    })
+                singer.write_bookmark(state, project['id'], streamId, {
+                    'since': from_change_date,
+                })
+                singer.write_state(state)
 
     return state
 
 def generate_sdc_id(org, id):
     return "{}/{}".format(org, id)
 
-def normalize_work_item(item, org, fieldMap):
+def translateWorkItem(item, org, projectId):
+    itemCopy = item.copy()
+    itemCopy['org'] = org
+    itemCopy['project'] = projectId
     # derive our own ID because unfortunately the ID of a work item is not a UUID
     # and instead is an incrementing integer within an Azure org
-    normalizedItem = {
-        "_sdc_id": generate_sdc_id(org, item['id'])
+    return {
+        'id': generate_sdc_id(org, item['id']),
+        'object': json.dumps(itemCopy),
     }
 
-    # for each field in the raw work item from Azure, use its mapped name to set the field
-    # value into the normalized item
-    for fieldName, fieldValue in item['fields'].items():
-        normalizedFieldName = fieldMap[fieldName]
-        normalizedItem[normalizedFieldName] = fieldValue
-
-    return normalizedItem
-
-def sync_all_updates(schema, org, project, teams, state, mdata, start_date):
-    global workItemIds
-
+def sync_updates_for_work_item(schema, org, project, workItemId, bookmarkDate, mdata):
     streamId = 'updates'
-    bookmarkDate = get_bookmark_date(state, project['id'], streamId, 'since', start_date)
-    logger.info("Syncing work item updates since = %s for %d items", bookmarkDate.isoformat(), len(workItemIds))
+    logger.info("Syncing work item updates since = %s for item %s", bookmarkDate.isoformat(), workItemId)
 
     with metrics.record_counter(streamId) as counter:
         extraction_time = singer.utils.now()
 
-        # iterate over all the work items that were processed so we can absorb their updates
-        for workItemId in workItemIds:
+        # ref: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/updates/list?view=azure-devops-rest-7.1&tabs=HTTP
+        for response in authed_get_all_pages(
+            streamId,
+            "https://dev.azure.com/{}/{}/_apis/wit/workItems/{}/updates?api-version={}".format(org, project['id'], workItemId, API_VERSION),
+            '$top',
+            '$skip'
+        ):
+            updates = response.json()['value']
+            updatesToProcess = []
 
-            # ref: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/updates/list?view=azure-devops-rest-7.1&tabs=HTTP
-            for response in authed_get_all_pages(
-                streamId,
-                "https://dev.azure.com/{}/{}/_apis/wit/workItems/{}/updates?api-version={}".format(org, project['id'], workItemId, API_VERSION),
-                '$top',
-                '$skip'
-            ):
-                updates = response.json()['value']
-                updatesToProcess = []
+            for update in updates:
+                # if this revision was ingested previously, then skip it. there is no way to make the
+                # API call itself filter these out
+                revisedDate = parse_iso8601(update['revisedDate'])
+                if revisedDate < bookmarkDate:
+                    continue
 
-                for update in updates:
-                    # if this revision was ingested previously, then skip it. there is no way to make the
-                    # API call itself filter these out
-                    revisedDate = parse_iso8601(update['revisedDate'])
-                    if revisedDate < bookmarkDate:
-                        continue
+                # Convert to ID + JSON, including org and project
+                outputUpdate = translateUpdate(update, org, project['id'])
+                updatesToProcess.append(outputUpdate)
 
-                    # convert the dict of <string, WorkItemFieldUpdate> to an array of objects suitable
-                    # for our desired output schema, which is an array of update objects.
-                    # WorkItemFieldUpdate: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/updates/list?view=azure-devops-rest-7.1&tabs=HTTP#workitemfieldupdate
-                    normalizedFields = []
-                    # If the only change was adding / removing a relation
-                    # no fields are changed
-                    if 'fields' in update:
-                        for fieldName, values in update['fields'].items():
-                            fieldName = FIELD_MAP.get(fieldName)
-                            if fieldName is not None:
-                                normalizedFields.append({
-                                    "fieldName": fieldName,
-                                    "oldValue": normalize_value_to_string(values.get('oldValue')),
-                                    "newValue": normalize_value_to_string(values.get('newValue')),
-                                })
+            emit_records(streamId, schema, org, project, updatesToProcess, extraction_time, counter, mdata)
 
-                    # derive our own ID because unfortunately the ID of an update is not a UUID
-                    # and instead is an incrementing integer within an Azure org
-                    update['_sdc_id'] = generate_sdc_id(org, update['id'])
-                    update['workItemSdcId'] = generate_sdc_id(org, update['workItemId'])
-                    update['fields'] = normalizedFields
-                    updatesToProcess.append(update)
-
-                emit_records(streamId, schema, org, project, updatesToProcess, extraction_time, counter, mdata)
-
-    singer.write_bookmark(state, project['id'], streamId, {
-        'since': singer.utils.strftime(extraction_time),
-    })
-
-    return state
-
-def normalize_value_to_string(value):
-    if value is None:
-        return value
-    if isinstance(value, str):
-        return value
-    elif isinstance(value, dict):
-        return json.dumps(value)
-    else:
-        return str(value) # probably a number or boolean
+def translateUpdate(update, org, projectId):
+    updateCopy = update.copy()
+    updateCopy['org'] = org
+    updateCopy['project'] = projectId
+    updateCopy['workItemSdcId'] = generate_sdc_id(org, update['workItemId'])
+    # derive our own ID because unfortunately the ID of a work item is not a UUID
+    # and instead is an incrementing integer within an Azure org
+    return {
+        'id': generate_sdc_id(org, update['id']),
+        'object': json.dumps(updateCopy),
+    }
 
 def sync_all_teams(schema, org, project, teams, state, mdata, start_date):
     # bookmarks not used for this stream
@@ -744,7 +892,21 @@ def sync_all_teams(schema, org, project, teams, state, mdata, start_date):
     logger.info("Syncing all teams")
     with metrics.record_counter(streamId) as counter:
         extraction_time = singer.utils.now()
-        emit_records(streamId, schema, org, project, teams, extraction_time, counter, mdata)
+        # Convert to ID + JSON, including org and project
+        outputItems = list(map(lambda item: translateObject(item, org, project['id']), teams))
+
+        emit_bookmark_records(
+            streamId,
+            schema,
+            org,
+            project,
+            outputItems,
+            extraction_time,
+            counter,
+            mdata,
+            state,
+            streamId
+        )
     return state
 
 def sync_project(schema, org, project, teams, state, mdata, start_date):
@@ -753,20 +915,22 @@ def sync_project(schema, org, project, teams, state, mdata, start_date):
     logger.info("Syncing project %s (ID = %s)", project.get('name'), project.get('id'))
     with metrics.record_counter(streamId) as counter:
         extraction_time = singer.utils.now()
-        emit_records(streamId, schema, org, project, [project], extraction_time, counter, mdata)
+        # Convert to ID + JSON, including org and project
+        outputItems = list(map(lambda item: translateObject(item, org, project['id']), [project]))
+
+        emit_bookmark_records(
+            streamId,
+            schema,
+            org,
+            project,
+            outputItems,
+            extraction_time,
+            counter,
+            mdata,
+            state,
+            streamId
+        )
     return state
-
-def emit_records(streamId, schema, org, project, objects, extraction_time, counter, mdata):
-    mdataMap = metadata.to_map(mdata)
-    for object in objects:
-        object['org'] = org
-        object['project'] = project['id']
-        with singer.Transformer() as transformer:
-            rec = transformer.transform(object, schema, metadata=mdataMap)
-        singer.write_record(streamId, rec, time_extracted=extraction_time)
-        if counter:
-            counter.increment()
-
 
 def get_selected_streams(catalog):
     '''
@@ -790,8 +954,10 @@ SYNC_FUNCTIONS = {
     'iterations': sync_all_iterations,
     'projects': sync_project,
     'teams': sync_all_teams,
+    'teammembers': sync_all_team_members,
     'workitems': sync_all_workitems,
-    'updates': sync_all_updates,
+    'workitemtypes': sync_all_work_item_types,
+    'workitemtypecategories': sync_all_work_item_type_categories,
 }
 
 SUB_STREAMS = {
@@ -854,7 +1020,7 @@ def do_sync(config, state, catalog):
             stream_schema = stream['schema']
             mdata = stream['metadata']
 
-            # if it is a "sub_stream", it will be sync'd by its parent
+            # if it is a "sub_stream", it will be sync'd by its parent (just updates for now)
             if not SYNC_FUNCTIONS.get(stream_id):
                 continue
 

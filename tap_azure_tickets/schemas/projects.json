@@ -10,62 +10,8 @@
         "string"
       ]
     },
-    "org": {
+    "object": {
       "type": [
-        "string"
-      ]
-    },
-    "abbreviation": {
-      "type": [
-        "null",
-        "string"
-      ]
-    },
-    "defaultTeamImageUrl": {
-      "type": [
-        "null",
-        "string"
-      ]
-    },
-    "description": {
-      "type": [
-        "null",
-        "string"
-      ]
-    },
-    "lastUpdateTime": {
-      "type": [
-        "null",
-        "string"
-      ]
-    },
-    "name": {
-      "type": [
-        "null",
-        "string"
-      ]
-    },
-    "revision": {
-      "type": [
-        "null",
-        "integer"
-      ]
-    },
-    "state": {
-      "type": [
-        "null",
-        "string"
-      ]
-    },
-    "url": {
-      "type": [
-        "null",
-        "string"
-      ]
-    },
-    "visibility": {
-      "type": [
-        "null",
         "string"
       ]
     }

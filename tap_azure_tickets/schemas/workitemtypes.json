@@ -1,11 +1,11 @@
 {
-  "title": "Iteration",
+  "title": "WorkItemType",
   "type": [
     "null",
     "object"
   ],
   "properties": {
-    "id": {
+    "_sdc_id": {
       "type": [
         "string"
       ]

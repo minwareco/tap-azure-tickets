@@ -10,32 +10,8 @@
         "string"
       ]
     },
-    "org": {
+    "object": {
       "type": [
-        "string"
-      ]
-    },
-    "description": {
-      "type": [
-        "null",
-        "string"
-      ]
-    },
-    "identityUrl": {
-      "type": [
-        "null",
-        "string"
-      ]
-    },
-    "name": {
-      "type": [
-        "null",
-        "string"
-      ]
-    },
-    "url": {
-      "type": [
-        "null",
         "string"
       ]
     }
