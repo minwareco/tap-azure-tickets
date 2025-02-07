@@ -789,6 +789,8 @@ def sync_all_workitems(schema, org, project, teams, state, mdata, start_date):
                     "ids": batchItemIds,
                     # Omitting this gets all the fields
                     # "fields": list(dict.keys(FIELD_MAP)),
+                    # This is necessary to get the relations and links
+                    "$expand": "all"
                 }
                 startIndex += pageSize
                 response = authed_post(
