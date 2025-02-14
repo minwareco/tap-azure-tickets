@@ -13,11 +13,12 @@ import singer
 import singer.bookmarks as bookmarks
 import singer.metrics as metrics
 import backoff
+from minware_singer_utils import SecureLogger
 
 from singer import metadata
 
 session = requests.Session()
-logger = singer.get_logger()
+logger = SecureLogger(singer.get_logger())
 
 REQUIRED_CONFIG_KEYS = [
     'start_date',
@@ -1053,6 +1054,8 @@ def do_sync(config, state, catalog):
 @singer.utils.handle_top_exception(logger)
 def main():
     args = singer.utils.parse_args(REQUIRED_CONFIG_KEYS)
+    if 'access_token' in args.config:
+        logger.addToken(args.config['access_token'])
 
     if args.discover:
         do_discover(args.config)
