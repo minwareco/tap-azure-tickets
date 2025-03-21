@@ -13,6 +13,7 @@ import singer
 import singer.bookmarks as bookmarks
 import singer.metrics as metrics
 import backoff
+import uuid
 from minware_singer_utils import SecureLogger
 
 from singer import metadata
@@ -32,6 +33,7 @@ KEY_PROPERTIES = {
     'boards': ['id'],
     'iterations': ['id'],
     'projects': ['id'],
+    'projects_normalized': ['id'],
     'teams': ['id'],
     'teammembers': ['id'],
     'updates': ['id'],
@@ -450,19 +452,31 @@ def do_discover(config):
     # dump catalog
     print(json.dumps(catalog, indent=2))
 
+def is_valid_uuid(value):
+    with suppress(ValueError):
+        return (True, uuid.UUID(str(value)))
+
+    return (False, None)
+
 def get_selected_projects(org, filters):
     filters = filters or []
 
-    # convert simple wildcard filter syntax into regex. for example, "abc*" becomes "^abc.*$"
+    id_filters = []
+    name_filters = []
     for filter in filters:
-        filter = filter.strip() \
-            .replace('.', '\\.') \
-            .replace('*', '.*')
-        filter = "^{}$".format(filter)
+        (is_uuid, parsed_uuid) = is_valid_uuid(filter)
+        if is_uuid:
+            id_filters.append(parsed_uuid)
+        else:
+            # convert simple wildcard filter syntax into regex. for example, "abc*" becomes "^abc.*$"
+            filter = filter.strip() \
+                .replace('.', '\\.') \
+                .replace('*', '.*')
+            name_filters.append("^{}$".format(filter))
 
     # if there are no filters, create one which will allow all projects
-    if len(filters) == 0:
-        filters = ['.*']
+    if len(name_filters) + len(id_filters) == 0:
+        name_filters = ['.*']
 
     result = []
     for response in authed_get_all_pages(
@@ -473,9 +487,15 @@ def get_selected_projects(org, filters):
     ):
         projects = response.json()['value']
         for project in projects:
-            for filter in filters:
-                if re.search(filter, project['name']):
+            for name_filter in name_filters:
+                if re.search(name_filter, project['name']):
                     result.append(project)
+
+            for id_filter in id_filters:
+                with suppress(ValueError):
+                    if id_filter == uuid.UUID(project.get('id')):
+                        result.append(project)
+
     return result
 
 def get_teams_for_project(org, projectId):
@@ -933,6 +953,33 @@ def sync_project(schema, org, project, teams, state, mdata, start_date):
         )
     return state
 
+def sync_project_normalized(schema, org, project, teams, state, mdata, start_date):
+    # bookmarks not used for this stream
+    streamId = 'projects_normalized'
+    logger.info("Syncing %s %s (ID = %s)", streamId, project.get('name'), project.get('id'))
+    with metrics.record_counter(streamId) as counter:
+        extraction_time = singer.utils.now()
+
+        logger.info(json.dumps(project, indent=2))
+
+        emit_records(
+            streamId,
+            schema,
+            org,
+            project,
+            [{
+                "id": project.get("id"),
+                "name": project.get("name"),
+                "description": project.get("description", None),
+                "url": project.get("url")
+            }],
+            extraction_time,
+            counter,
+            mdata
+        )
+
+    return state
+
 def get_selected_streams(catalog):
     '''
     Gets selected streams based on the 'selected' property.
@@ -954,6 +1001,7 @@ SYNC_FUNCTIONS = {
     'boards': sync_all_boards,
     'iterations': sync_all_iterations,
     'projects': sync_project,
+    'projects_normalized': sync_project_normalized,
     'teams': sync_all_teams,
     'teammembers': sync_all_team_members,
     'workitems': sync_all_workitems,
