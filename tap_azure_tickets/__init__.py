@@ -540,19 +540,71 @@ def sync_all_boards(schema, org, project, teams, state, mdata, start_date):
 
     with metrics.record_counter(streamId) as counter:
         extraction_time = singer.utils.now()
-        try:
+        # Need to iterate through each team and fetch the iterations separately for them, otherwise
+        # it will only fetch iterations for the current user's team.
+        for team in teams:
+            try:
+                pageNum = 0
+                for response in authed_get_all_pages(
+                    'boards',
+                    "https://dev.azure.com/{}/{}/{}/_apis/work/boards?api-version={}".format(
+                        org,
+                        project['id'],
+                        team['id'],
+                        API_VERSION
+                    ),
+                    '$top',
+                    '$skip'
+                ):
+                    pageNum += 1
+                    boards = response.json()['value']
+
+                    # Convert to ID + JSON, including org and project
+                    outputItems = list(map(lambda item: translateObject(item, org, project['id']), boards))
+
+                    emit_bookmark_records(
+                        streamId,
+                        schema,
+                        org,
+                        project,
+                        outputItems,
+                        extraction_time,
+                        counter,
+                        mdata,
+                        state,
+                        '/'.join([streamId, str(pageNum)])
+                    )
+            except InternalServerError as ex:
+                ex_str = str(ex)
+                if any(ignored_ex in ex_str for ignored_ex in ignored_exceptions):
+                    logger.warning("Ignoring handled internal server error for boards: %s", ex_str)
+                else:
+                    raise ex
+    return state
+
+def sync_all_iterations(schema, org, project, teams, state, mdata, start_date):
+    # bookmarks not used for this stream
+    streamId = 'iterations'
+    logger.info("Syncing all iterations")
+
+    with metrics.record_counter(streamId) as counter:
+        extraction_time = singer.utils.now()
+        # Need to iterate through each team and fetch the iterations separately for them, otherwise
+        # it will only fetch iterations for the current user's team.
+        for team in teams:
             pageNum = 0
             for response in authed_get_all_pages(
-                'boards',
-                "https://dev.azure.com/{}/{}/_apis/work/boards?api-version={}".format(org, project['id'], API_VERSION),
+                'iterations',
+                "https://dev.azure.com/{}/{}/{}/_apis/work/teamsettings/iterations?api-version={}".format(
+                    org, project['id'], team['id'], API_VERSION),
                 '$top',
                 '$skip'
             ):
                 pageNum += 1
-                boards = response.json()['value']
+                iterations = response.json()['value']
 
                 # Convert to ID + JSON, including org and project
-                outputItems = list(map(lambda item: translateObject(item, org, project['id']), boards))
+                outputItems = list(map(lambda item: translateObject(item, org, project['id']), iterations))
 
                 emit_bookmark_records(
                     streamId,
@@ -566,46 +618,6 @@ def sync_all_boards(schema, org, project, teams, state, mdata, start_date):
                     state,
                     '/'.join([streamId, str(pageNum)])
                 )
-        except InternalServerError as ex:
-            ex_str = str(ex)
-            if any(ignored_ex in ex_str for ignored_ex in ignored_exceptions):
-                logger.warning("Ignoring handled internal server error for boards: %s", ex_str)
-            else:
-                raise ex
-    return state
-
-def sync_all_iterations(schema, org, project, teams, state, mdata, start_date):
-    # bookmarks not used for this stream
-    streamId = 'iterations'
-    logger.info("Syncing all iterations")
-
-    with metrics.record_counter(streamId) as counter:
-        extraction_time = singer.utils.now()
-        pageNum = 0
-        for response in authed_get_all_pages(
-            'iterations',
-            "https://dev.azure.com/{}/{}/_apis/work/teamsettings/iterations?api-version={}".format(org, project['id'], API_VERSION),
-            '$top',
-            '$skip'
-        ):
-            pageNum += 1
-            iterations = response.json()['value']
-
-            # Convert to ID + JSON, including org and project
-            outputItems = list(map(lambda item: translateObject(item, org, project['id']), iterations))
-
-            emit_bookmark_records(
-                streamId,
-                schema,
-                org,
-                project,
-                outputItems,
-                extraction_time,
-                counter,
-                mdata,
-                state,
-                '/'.join([streamId, str(pageNum)])
-            )
     return state
 
 def sync_all_work_item_types(schema, org, project, teams, state, mdata, start_date):
