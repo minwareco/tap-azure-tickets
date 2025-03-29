@@ -960,8 +960,6 @@ def sync_project_normalized(schema, org, project, teams, state, mdata, start_dat
     with metrics.record_counter(streamId) as counter:
         extraction_time = singer.utils.now()
 
-        logger.info(json.dumps(project, indent=2))
-
         emit_records(
             streamId,
             schema,
