@@ -3,7 +3,7 @@
 from setuptools import setup, find_packages
 import os
 
-UTILS_VERSION = "f97b932a0623b60e0de7212033107848340387ef"
+UTILS_VERSION = os.environ.get("UTILS_VERSION")
 
 setup(name='tap-azure-tickets',
       version='0.1',
