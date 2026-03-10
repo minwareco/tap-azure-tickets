@@ -31,6 +31,8 @@ REQUIRED_CONFIG_KEYS = [
 
 KEY_PROPERTIES = {
     'boards': ['id'],
+    'github_connections': ['id'],
+    'github_connection_repos': ['id'],
     'iterations': ['id'],
     'projects': ['id'],
     'projects_normalized': ['id'],
@@ -990,6 +992,77 @@ def sync_project_normalized(schema, org, project, teams, state, mdata, start_dat
 
     return state
 
+_github_connections_synced = False
+
+def sync_all_github_connections(schema, org, project, teams, state, mdata, start_date):
+    global _github_connections_synced
+    if _github_connections_synced:
+        return state
+    _github_connections_synced = True
+
+    streamId = 'github_connections'
+    logger.info("Syncing GitHub connections")
+
+    with metrics.record_counter(streamId) as counter:
+        extraction_time = singer.utils.now()
+
+        try:
+            response = authed_get(
+                'github_connections',
+                "https://dev.azure.com/{}/_apis/githubconnections?api-version=7.2-preview.1".format(org)
+            )
+        except (NotFoundException, BadRequestException, BadCredentialsException, AuthException) as ex:
+            logger.info("GitHub connections API not available for org %s: %s", org, str(ex))
+            return state
+
+        connections = response.json().get('value', [])
+
+        outputItems = []
+        for connection in connections:
+            connectionCopy = connection.copy()
+            connectionCopy['org'] = org
+            outputItems.append({
+                'id': connection['id'],
+                'object': json.dumps(connectionCopy),
+            })
+
+            sync_github_connection_repos(schema, org, connection['id'], mdata)
+
+        emit_records(streamId, schema, org, project, outputItems, extraction_time, counter, mdata)
+
+    return state
+
+def sync_github_connection_repos(schema, org, connectionId, mdata):
+    streamId = 'github_connection_repos'
+    logger.info("Syncing repos for GitHub connection %s", connectionId)
+
+    with metrics.record_counter(streamId) as counter:
+        extraction_time = singer.utils.now()
+
+        try:
+            response = authed_get(
+                'github_connection_repos',
+                "https://dev.azure.com/{}/_apis/githubconnections/{}/repos?api-version=7.2-preview.1".format(org, connectionId)
+            )
+        except (NotFoundException, BadRequestException, BadCredentialsException, AuthException) as ex:
+            logger.info("GitHub connection repos not available for connection %s: %s", connectionId, str(ex))
+            return
+
+        repos = response.json().get('value', [])
+
+        outputItems = []
+        for repo in repos:
+            repoCopy = repo.copy()
+            repoCopy['org'] = org
+            repoCopy['connectionId'] = connectionId
+            repoId = repo.get('id', repo.get('name', repo.get('url', '')))
+            outputItems.append({
+                'id': '{}/{}'.format(connectionId, repoId),
+                'object': json.dumps(repoCopy),
+            })
+
+        emit_records(streamId, schema, org, None, outputItems, extraction_time, counter, mdata)
+
 def get_selected_streams(catalog):
     '''
     Gets selected streams based on the 'selected' property.
@@ -1009,6 +1082,7 @@ def get_stream_from_catalog(stream_id, catalog):
 
 SYNC_FUNCTIONS = {
     'boards': sync_all_boards,
+    'github_connections': sync_all_github_connections,
     'iterations': sync_all_iterations,
     'projects': sync_project,
     'projects_normalized': sync_project_normalized,
@@ -1020,6 +1094,7 @@ SYNC_FUNCTIONS = {
 }
 
 SUB_STREAMS = {
+    'github_connections': ['github_connection_repos'],
     'workitems': ['updates'],
 }
 
@@ -1083,6 +1158,13 @@ def do_sync(config, state, catalog):
     if updatesSchema:
         singer.write_schema('updates', updatesSchema, updatesKeyProperties)
         is_schema_written['updates'] = True
+
+    # Write out github_connection_repos schema since it is a sub-stream
+    for stream in catalog['streams']:
+        if stream['tap_stream_id'] == 'github_connection_repos':
+            singer.write_schema('github_connection_repos', stream['schema'], stream['key_properties'])
+            is_schema_written['github_connection_repos'] = True
+            break
 
     for project in projects:
         logger.info("Starting sync of project: %s using start date: %s", project['name'], start_date)

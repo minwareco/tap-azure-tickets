@@ -1,0 +1,19 @@
+{
+  "title": "GitHubConnectionRepo",
+  "type": [
+    "null",
+    "object"
+  ],
+  "properties": {
+    "id": {
+      "type": [
+        "string"
+      ]
+    },
+    "object": {
+      "type": [
+        "string"
+      ]
+    }
+  }
+}
