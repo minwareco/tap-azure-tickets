@@ -1,0 +1,18 @@
+# Security PRs for high/critical alerts are opened by the org-level Dependabot rule; this file does
+# not enable version-update PRs (open-pull-requests-limit: 0). It names the reviewers and assignee
+# for the PRs Dependabot opens and, where present, lets Dependabot read the private @minware npm
+# packages. CODEOWNERS is generated from the reviewers listed here (dependabot/codeowner-migration-action).
+# Rolled out to every deployed repo from the same generator; keep it in step.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    reviewers:
+      - CTaylor1118
+      - KBorders01
+      - aaboyd
+    assignees:
+      - CTaylor1118
