@@ -1,9 +1,0 @@
-# Dependabot reviewers (migrated from .github/dependabot.yml)
-/Pipfile.lock @CTaylor1118
-/pyproject.toml @CTaylor1118
-/requirements.txt @CTaylor1118
-/setup.cfg @CTaylor1118
-/setup.py @CTaylor1118
-/Pipfile @CTaylor1118
-/requirements/*.txt @CTaylor1118
-/**/requirements/*.txt @CTaylor1118
