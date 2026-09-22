@@ -1,7 +1,10 @@
-# Security PRs for high/critical alerts are opened by the org-level Dependabot rule; this file does
-# not enable version-update PRs (open-pull-requests-limit: 0). It names the reviewers and assignee
-# for the PRs Dependabot opens and, where present, lets Dependabot read the private @minware npm
-# packages. CODEOWNERS is generated from the reviewers listed here (dependabot/codeowner-migration-action).
+# Package ecosystems (npm, pip, github-actions): security PRs for high/critical alerts are opened by
+# the org-level Dependabot rule, and version-update PRs are off (open-pull-requests-limit: 0).
+# Docker is the exception: base images have no security advisories, so the only way to pick up a
+# patched base OS is a version update, which is enabled below.
+# This file also names the reviewer and assignee for the PRs Dependabot opens and, where present,
+# lets Dependabot read the private @minware npm packages. CODEOWNERS is generated from the reviewers
+# listed here (dependabot/codeowner-migration-action).
 # Rolled out to every deployed repo from the same generator; keep it in step.
 version: 2
 updates:
@@ -17,7 +20,5 @@ updates:
           - "*"
     reviewers:
       - CTaylor1118
-      - KBorders01
-      - aaboyd
     assignees:
       - CTaylor1118
