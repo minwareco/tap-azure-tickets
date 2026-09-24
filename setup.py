@@ -13,7 +13,7 @@ setup(name='tap-azure-tickets',
       py_modules=['tap_azure_tickets'],
       install_requires=[
           'singer-python==6.1.0',
-          'requests==2.33.0',
+          'requests==2.32.5',
           'psutil==5.8.0',
           'minware_singer_utils@git+https://{}github.com/minwareco/minware-singer-utils.git@{}'.format(
               "{}@".format(os.environ.get("GITHUB_TOKEN")) if os.environ.get("GITHUB_TOKEN") else "",
